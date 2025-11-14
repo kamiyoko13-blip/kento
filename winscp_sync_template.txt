@@ -1,0 +1,42 @@
+# WinSCP script template for safe synchronization (EDIT BEFORE RUN)
+# Instructions:
+# 1) Replace USERNAME and HOST with your account and host.
+# 2) Prefer key-based auth: set -privatekey to the full path of your .ppk (or OpenSSH key).
+# 3) Obtain the server hostkey fingerprint (use WinSCP GUI on first connect or ask admin) and paste
+#    it into -hostkey="..." to protect against MITM attacks.
+# 4) This template uses -preview (preview the transfer). Remove -preview to actually transfer files.
+# 5) Do NOT include passwords in scripts in plain text. Use key auth or Pageant.
+
+# Example (KEY AUTH, recommended):
+# open sftp://ninitan@160.251.213.125:22 -privatekey="C:\Users\81806\.ssh\notify_deploy.ppk" -hostkey="ssh-ed25519 256 SHA256:FJ9k0ZBv6g1LMaM2GSkH1fDzZ84arFsplTTIg98G/yk"
+# Example (PASSWORD AUTH, not recommended):
+# DO NOT put plaintext passwords in scripts. Use key-based auth or Pageant instead.
+# Bad (DO NOT use):
+# open sftp://ninitan:PASSWORD@160.251.213.125:22 -hostkey="ssh-ed25519 256 SHA256:FJ9k0ZBv6g1LMaM2GSkH1fDzZ84arFsplTTIg98G/yk"
+# Good (key-based):
+# open sftp://ninitan@160.251.213.125:22 -privatekey="C:\Users\81806\.ssh\notify_deploy.ppk" -hostkey="ssh-ed25519 256 SHA256:FJ9k0ZBv6g1LMaM2GSkH1fDzZ84arFsplTTIg98G/yk"
+
+# Edit the line below and remove the leading '#' when you have filled USERNAME/HOST and the path to your private key (if needed).
+# NOTE: host fingerprints obtained from the server are included as examples below. Replace USERNAME and HOST before running.
+# Example (ED25519, preferred):
+#open sftp://ninitan@160.251.213.125:22 -privatekey="C:\path\to\your\privatekey.ppk" -hostkey="ssh-ed25519 256 SHA256:FJ9k0ZBv6g1LMaM2GSkH1fDzZ84arFsplTTIg98G/yk"
+# Example (ECDSA fallback):
+#open sftp://ninitan@160.251.213.125:22 -privatekey="C:\path\to\your\privatekey.ppk" -hostkey="ecdsa-sha2-nistp256 256 SHA256:ji7gXZJ/wQAp8TQKoxGTLE1Kf07+jGAnzkTg4kIzdQk"
+# Example (RSA fallback):
+#open sftp://ninitan@160.251.213.125:22 -privatekey="C:\path\to\your\privatekey.ppk" -hostkey="ssh-rsa 3072 SHA256:lS5HJl+vEXgIU/RNkfl/dZ3xIGH2fMa7VIjKHFVKuPc"
+
+# Local and remote directories
+lcd C:\Users\81806\Desktop\notify_project
+cd /home/ninitan/notify_project
+
+# Edit the line below: replace HOST with your server (keep USERNAME and privatekey path as needed).
+# Recommended (key-based auth, ED25519 hostkey inserted):
+open sftp://ninitan@160.251.213.125:22 -privatekey="C:\Users\81806\.ssh\notify_deploy.ppk" -hostkey="ssh-ed25519 256 SHA256:FJ9k0ZBv6g1LMaM2GSkH1fDzZ84arFsplTTIg98G/yk"
+
+
+synchronize remote -filemask="* | *.env;backups/;*.bak;*.pem;*.key;*.p12;*.env.*" -resume -criteria=timestamp -preview
+
+# Note: filemask syntax here uses an include on the left and semicolon-separated exclude masks on the right.
+# Example: "* | *.env;backups/;*.bak" means include everything except files matching the exclude masks.
+
+exit

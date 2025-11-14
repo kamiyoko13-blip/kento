@@ -1,0 +1,39 @@
+# Ignore local environment file with secrets
+.env
+
+# Virtual envs
+.venv/
+venv/
+
+# Python cache
+__pycache__/
+*.py[cod]
+
+# Editor/temp
+*.swp
+.vscode/
+Thumbs.db
+desktop.ini
+# Environment variables (機密情報)
+.env
+.env.*
+.env.new
+.env.bak
+.env.backup
+config.env
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Virtual environment  
+venv/
+env/
+
+# Logs
+*.log
+
+# OS
+.DS_Store
+Thumbs.db

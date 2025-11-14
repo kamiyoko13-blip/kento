@@ -1,0 +1,5 @@
+open sftp://ninitan@160.251.213.125:22 -privatekey="C:\Users\81806\.ssh\notify_deploy.ppk" -hostkey="ssh-ed25519 256 SHA256:FJ9k0ZBv6g1LMaM2GSkH1fDzZ84arFsplTTIg98G/yk"
+call python3 --version
+call pip3 list | grep -E "ccxt|requests|python-dotenv"
+call ls -la /home/ninitan/notify_project/.env 2>&1 || echo ".env not found"
+exit
