@@ -1298,6 +1298,275 @@ def get_latest_price(exchange, pair='BTC/JPY', retries=3, backoff=1.0):
     return None
 
 
+# === プライベートAPI関数群（認証必須） ===
+
+def get_account_balance(exchange):
+    """資産の一覧（残高）を取得します。
+    
+    Returns:
+        dict: {
+            'total': {'JPY': 100000.0, 'BTC': 0.5, ...},
+            'free': {'JPY': 50000.0, 'BTC': 0.3, ...},
+            'used': {'JPY': 50000.0, 'BTC': 0.2, ...}
+        }
+    """
+    try:
+        if str(os.getenv('DRY_RUN', '0')).lower() in ('1', 'true', 'yes', 'on'):
+            return {
+                'total': {'JPY': 100000.0, 'BTC': 0.0},
+                'free': {'JPY': 100000.0, 'BTC': 0.0},
+                'used': {'JPY': 0.0, 'BTC': 0.0}
+            }
+        
+        balance = exchange.fetch_balance()
+        return {
+            'total': balance.get('total', {}),
+            'free': balance.get('free', {}),
+            'used': balance.get('used', {})
+        }
+    except Exception as e:
+        try:
+            log_error(f"❌ 残高取得エラー: {e}")
+        except Exception:
+            pass
+        return {'total': {}, 'free': {}, 'used': {}}
+
+
+def get_open_orders(exchange, pair='BTC/JPY'):
+    """アクティブな注文（未約定の注文）を取得します。
+    
+    Returns:
+        list: [
+            {
+                'id': 'order_id',
+                'symbol': 'BTC/JPY',
+                'type': 'limit',
+                'side': 'buy',
+                'price': 5000000.0,
+                'amount': 0.001,
+                'remaining': 0.001,
+                'status': 'open'
+            }, ...
+        ]
+    """
+    try:
+        if str(os.getenv('DRY_RUN', '0')).lower() in ('1', 'true', 'yes', 'on'):
+            return []
+        
+        orders = exchange.fetch_open_orders(pair)
+        result = []
+        for order in orders:
+            try:
+                result.append({
+                    'id': order.get('id'),
+                    'symbol': order.get('symbol'),
+                    'type': order.get('type'),
+                    'side': order.get('side'),
+                    'price': float(order.get('price', 0)),
+                    'amount': float(order.get('amount', 0)),
+                    'remaining': float(order.get('remaining', 0)),
+                    'filled': float(order.get('filled', 0)),
+                    'status': order.get('status'),
+                    'timestamp': order.get('timestamp'),
+                    'datetime': order.get('datetime')
+                })
+            except Exception:
+                continue
+        return result
+    except Exception as e:
+        try:
+            log_error(f"❌ オープン注文取得エラー: {e}")
+        except Exception:
+            pass
+        return []
+
+
+def get_order_history(exchange, pair='BTC/JPY', limit=100):
+    """注文履歴（完了した注文を含む全履歴）を取得します。
+    
+    Returns:
+        list: 注文情報のリスト
+    """
+    try:
+        if str(os.getenv('DRY_RUN', '0')).lower() in ('1', 'true', 'yes', 'on'):
+            return []
+        
+        orders = exchange.fetch_orders(pair, limit=limit)
+        result = []
+        for order in orders:
+            try:
+                result.append({
+                    'id': order.get('id'),
+                    'symbol': order.get('symbol'),
+                    'type': order.get('type'),
+                    'side': order.get('side'),
+                    'price': float(order.get('price', 0)) if order.get('price') else None,
+                    'amount': float(order.get('amount', 0)),
+                    'filled': float(order.get('filled', 0)),
+                    'remaining': float(order.get('remaining', 0)),
+                    'cost': float(order.get('cost', 0)) if order.get('cost') else None,
+                    'status': order.get('status'),
+                    'timestamp': order.get('timestamp'),
+                    'datetime': order.get('datetime')
+                })
+            except Exception:
+                continue
+        return result
+    except Exception as e:
+        try:
+            log_error(f"❌ 注文履歴取得エラー: {e}")
+        except Exception:
+            pass
+        return []
+
+
+def cancel_order(exchange, order_id, pair='BTC/JPY'):
+    """指定した注文IDの注文をキャンセルします。
+    
+    Args:
+        exchange: 取引所オブジェクト
+        order_id: キャンセルする注文のID
+        pair: 通貨ペア
+    
+    Returns:
+        dict: キャンセル結果 or None
+    """
+    try:
+        if str(os.getenv('DRY_RUN', '0')).lower() in ('1', 'true', 'yes', 'on'):
+            print(f"🔧 DRY_RUN: 注文キャンセル（ID: {order_id}）はシミュレーションです")
+            return {'id': order_id, 'status': 'canceled'}
+        
+        result = exchange.cancel_order(order_id, pair)
+        try:
+            log_info(f"✅ 注文キャンセル成功: ID={order_id}")
+        except Exception:
+            pass
+        return result
+    except Exception as e:
+        try:
+            log_error(f"❌ 注文キャンセルエラー: {e}")
+        except Exception:
+            pass
+        return None
+
+
+def get_my_trades(exchange, pair='BTC/JPY', limit=100):
+    """自分の約定履歴を取得します（プライベートAPI）。
+    
+    Returns:
+        list: [
+            {
+                'id': 'trade_id',
+                'order': 'order_id',
+                'symbol': 'BTC/JPY',
+                'type': 'limit',
+                'side': 'buy',
+                'price': 5000000.0,
+                'amount': 0.001,
+                'cost': 5000.0,
+                'fee': {'cost': 5.0, 'currency': 'JPY'},
+                'timestamp': 1234567890000,
+                'datetime': '2024-01-01T00:00:00.000Z'
+            }, ...
+        ]
+    """
+    try:
+        if str(os.getenv('DRY_RUN', '0')).lower() in ('1', 'true', 'yes', 'on'):
+            return []
+        
+        trades = exchange.fetch_my_trades(pair, limit=limit)
+        result = []
+        for trade in trades:
+            try:
+                result.append({
+                    'id': trade.get('id'),
+                    'order': trade.get('order'),
+                    'symbol': trade.get('symbol'),
+                    'type': trade.get('type'),
+                    'side': trade.get('side'),
+                    'price': float(trade.get('price', 0)),
+                    'amount': float(trade.get('amount', 0)),
+                    'cost': float(trade.get('cost', 0)),
+                    'fee': trade.get('fee'),
+                    'timestamp': trade.get('timestamp'),
+                    'datetime': trade.get('datetime')
+                })
+            except Exception:
+                continue
+        return result
+    except Exception as e:
+        try:
+            log_error(f"❌ 約定履歴取得エラー: {e}")
+        except Exception:
+            pass
+        return []
+
+
+def get_deposit_address(exchange, currency='BTC'):
+    """出金用のアドレス（デポジットアドレス）を取得します。
+    
+    Args:
+        exchange: 取引所オブジェクト
+        currency: 通貨コード（'BTC', 'ETH'など）
+    
+    Returns:
+        dict: {'address': 'xxx', 'tag': None, ...}
+    """
+    try:
+        if str(os.getenv('DRY_RUN', '0')).lower() in ('1', 'true', 'yes', 'on'):
+            return {'address': 'dry_run_address', 'tag': None, 'currency': currency}
+        
+        address_info = exchange.fetch_deposit_address(currency)
+        return {
+            'address': address_info.get('address'),
+            'tag': address_info.get('tag'),
+            'currency': address_info.get('currency'),
+            'network': address_info.get('network')
+        }
+    except Exception as e:
+        try:
+            log_error(f"❌ デポジットアドレス取得エラー: {e}")
+        except Exception:
+            pass
+        return {}
+
+
+def request_withdrawal(exchange, currency, amount, address, tag=None):
+    """出金をリクエストします。
+    
+    Args:
+        exchange: 取引所オブジェクト
+        currency: 通貨コード（'BTC', 'JPY'など）
+        amount: 出金額
+        address: 出金先アドレス
+        tag: タグ（XRPなど一部の通貨で必要）
+    
+    Returns:
+        dict: 出金リクエスト結果 or None
+    """
+    try:
+        if str(os.getenv('DRY_RUN', '0')).lower() in ('1', 'true', 'yes', 'on'):
+            print(f"🔧 DRY_RUN: 出金リクエスト（{amount} {currency} → {address}）はシミュレーションです")
+            return {'id': 'dry_withdraw_id', 'currency': currency, 'amount': amount}
+        
+        params = {}
+        if tag:
+            params['tag'] = tag
+        
+        result = exchange.withdraw(currency, amount, address, params=params)
+        try:
+            log_info(f"✅ 出金リクエスト成功: {amount} {currency}")
+        except Exception:
+            pass
+        return result
+    except Exception as e:
+        try:
+            log_error(f"❌ 出金リクエストエラー: {e}")
+        except Exception:
+            pass
+        return None
+
+
 def compute_dynamic_threshold(exchange, pair='BTC/JPY', days=DYN_OHLCV_DAYS,
                               buffer_jpy=DYN_THRESHOLD_BUFFER_JPY, buffer_pct=DYN_THRESHOLD_BUFFER_PCT):
     """過去 `days` 日の OHLCV を取得し、1年レンジの最安値を基に閾値を算出します。
@@ -1496,6 +1765,134 @@ def compute_rsi(values, period=14):
         return rsi
     except Exception:
         return None
+
+
+def get_orderbook(exchange, pair='BTC/JPY', depth=10):
+    """板情報（オーダーブック）を取得します。
+    
+    Returns:
+        dict: {
+            'bids': [[price, amount], ...],  # 買い注文（高い順）
+            'asks': [[price, amount], ...],  # 売り注文（安い順）
+            'spread': float,                  # スプレッド（ask - bid）
+            'mid_price': float                # 仲値
+        }
+    """
+    try:
+        orderbook = exchange.fetch_order_book(pair, limit=depth)
+        bids = orderbook.get('bids', [])[:depth]
+        asks = orderbook.get('asks', [])[:depth]
+        
+        bid_price = float(bids[0][0]) if bids else None
+        ask_price = float(asks[0][0]) if asks else None
+        
+        spread = None
+        mid_price = None
+        if bid_price is not None and ask_price is not None:
+            spread = ask_price - bid_price
+            mid_price = (bid_price + ask_price) / 2.0
+        
+        return {
+            'bids': bids,
+            'asks': asks,
+            'spread': spread,
+            'mid_price': mid_price,
+            'best_bid': bid_price,
+            'best_ask': ask_price
+        }
+    except Exception as e:
+        try:
+            log_warn(f"⚠️ 板情報の取得に失敗: {e}")
+        except Exception:
+            pass
+        return {
+            'bids': [],
+            'asks': [],
+            'spread': None,
+            'mid_price': None,
+            'best_bid': None,
+            'best_ask': None
+        }
+
+
+def get_recent_trades(exchange, pair='BTC/JPY', limit=100):
+    """最近の約定履歴を取得します。
+    
+    Returns:
+        list: [
+            {
+                'timestamp': int,
+                'datetime': str,
+                'price': float,
+                'amount': float,
+                'side': 'buy' or 'sell'
+            }, ...
+        ]
+    """
+    try:
+        trades = exchange.fetch_trades(pair, limit=limit)
+        result = []
+        for trade in trades:
+            try:
+                result.append({
+                    'timestamp': trade.get('timestamp'),
+                    'datetime': trade.get('datetime'),
+                    'price': float(trade.get('price', 0)),
+                    'amount': float(trade.get('amount', 0)),
+                    'side': trade.get('side', 'unknown')
+                })
+            except Exception:
+                continue
+        return result
+    except Exception as e:
+        try:
+            log_warn(f"⚠️ 約定履歴の取得に失敗: {e}")
+        except Exception:
+            pass
+        return []
+
+
+def analyze_orderbook_pressure(orderbook_data):
+    """板情報から買い圧力/売り圧力を分析します。
+    
+    Returns:
+        dict: {
+            'buy_pressure': float,   # 買い板の総量
+            'sell_pressure': float,  # 売り板の総量
+            'pressure_ratio': float, # 買い圧力 / 売り圧力
+            'signal': str            # 'BULLISH', 'BEARISH', 'NEUTRAL'
+        }
+    """
+    try:
+        bids = orderbook_data.get('bids', [])
+        asks = orderbook_data.get('asks', [])
+        
+        buy_volume = sum(float(bid[1]) for bid in bids if len(bid) >= 2)
+        sell_volume = sum(float(ask[1]) for ask in asks if len(ask) >= 2)
+        
+        ratio = None
+        signal = 'NEUTRAL'
+        
+        if sell_volume > 0:
+            ratio = buy_volume / sell_volume
+            if ratio > 1.2:
+                signal = 'BULLISH'  # 買い圧力が強い
+            elif ratio < 0.8:
+                signal = 'BEARISH'  # 売り圧力が強い
+        
+        return {
+            'buy_pressure': buy_volume,
+            'sell_pressure': sell_volume,
+            'pressure_ratio': ratio,
+            'signal': signal
+        }
+    except Exception:
+        return {
+            'buy_pressure': 0,
+            'sell_pressure': 0,
+            'pressure_ratio': None,
+            'signal': 'NEUTRAL'
+        }
 
 
 def compute_indicators(exchange, pair='BTC/JPY', timeframe='1h', limit=500):
@@ -2119,6 +2516,49 @@ def run_bot(exchange, fund_manager_instance):
     print(f"💰 1回あたりの注文予算: {JAPANESE_YEN_BUDGET} 円")
     print(f"📉 最低注文数量: {MIN_ORDER_BTC} BTC")
 
+    # --- 取引所の残高情報を取得して表示（少額運用向けに簡潔に） ---
+    try:
+        balance_info = get_account_balance(exchange)
+        if balance_info and balance_info.get('total'):
+            jpy_free = balance_info['free'].get('JPY', 0)
+            btc_free = balance_info['free'].get('BTC', 0)
+            # 少額運用では利用可能額のみ表示（総額は省略）
+            print(f"💼 利用可能残高: JPY={jpy_free:.0f}円, BTC={btc_free:.8f}BTC")
+    except Exception as e:
+        try:
+            log_warn(f"⚠️ 残高取得に失敗: {e}")
+        except Exception:
+            pass
+
+    # --- アクティブな注文を表示（少額運用では簡潔に） ---
+    try:
+        open_orders = get_open_orders(exchange, pair)
+        if open_orders:
+            print(f"📋 未約定注文: {len(open_orders)}件")
+            # 少額運用では最大2件まで表示
+            for order in open_orders[:2]:
+                print(f"  {order['side'].upper()} {order['amount']:.4f}BTC @ {order['price']:.0f}円")
+    except Exception as e:
+        try:
+            log_warn(f"⚠️ アクティブ注文取得に失敗: {e}")
+        except Exception:
+            pass
+
+    # --- 最近の約定履歴を表示（少額運用では最新2件のみ） ---
+    try:
+        my_trades = get_my_trades(exchange, pair, limit=5)
+        if my_trades:
+            print(f"💱 最近の約定: {len(my_trades)}件")
+            # 少額運用では最新2件のみ簡潔に表示
+            for trade in my_trades[:2]:
+                fee_cost = trade.get('fee', {}).get('cost', 0) if trade.get('fee') else 0
+                print(f"  {trade['side'].upper()} {trade['amount']:.4f}BTC @ {trade['price']:.0f}円 (手数料:{fee_cost:.2f}円)")
+    except Exception as e:
+        try:
+            log_warn(f"⚠️ 約定履歴取得に失敗: {e}")
+        except Exception:
+            pass
+
 
     # state を読み込み、保有ポジションがあれば利確チェックを行う
     # --- 低残高アラート設定 ---
@@ -2371,6 +2811,42 @@ def run_bot(exchange, fund_manager_instance):
                 pass
         except Exception:
             indicators = None
+
+        # --- 板情報と約定履歴の分析 ---
+        try:
+            # 板情報を取得
+            orderbook = get_orderbook(exchange, pair, depth=10)
+            if orderbook and orderbook.get('mid_price'):
+                print(f"📊 板情報: 仲値={orderbook['mid_price']:.0f}円, スプレッド={orderbook.get('spread', 0):.0f}円, "
+                      f"最良買={orderbook.get('best_bid', 0):.0f}円, 最良売={orderbook.get('best_ask', 0):.0f}円")
+                
+                # 板の圧力を分析
+                pressure = analyze_orderbook_pressure(orderbook)
+                print(f"📈 板圧力: 買い={pressure['buy_pressure']:.4f}BTC, 売り={pressure['sell_pressure']:.4f}BTC, "
+                      f"比率={pressure.get('pressure_ratio', 0):.2f}, シグナル={pressure['signal']}")
+        except Exception as e:
+            try:
+                log_warn(f"⚠️ 板情報の分析に失敗: {e}")
+            except Exception:
+                pass
+
+        try:
+            # 最近の約定履歴を取得（直近50件）
+            recent_trades = get_recent_trades(exchange, pair, limit=50)
+            if recent_trades:
+                # 買い/売りの割合を計算
+                buy_count = sum(1 for t in recent_trades if t.get('side') == 'buy')
+                sell_count = sum(1 for t in recent_trades if t.get('side') == 'sell')
+                total_volume = sum(t.get('amount', 0) for t in recent_trades)
+                avg_price = sum(t.get('price', 0) * t.get('amount', 0) for t in recent_trades) / total_volume if total_volume > 0 else 0
+                
+                print(f"💹 約定履歴(直近50件): 買い={buy_count}件, 売り={sell_count}件, "
+                      f"合計出来高={total_volume:.4f}BTC, 平均価格={avg_price:.0f}円")
+        except Exception as e:
+            try:
+                log_warn(f"⚠️ 約定履歴の分析に失敗: {e}")
+            except Exception:
+                pass
 
         # 初期表示用に手数料を考慮した数量を算出
         initial_qty, initial_cost, initial_fee = compute_qty_for_budget_with_fee(
@@ -2639,12 +3115,94 @@ def run_bot(exchange, fund_manager_instance):
                     except Exception:
                         watch_ref = float(latest_price_now) if latest_price_now is not None else None
 
+                # 🔧 自動修正: watch_refが現在価格と大きく乖離している場合は現在価格にリセット
+                # （過去の売却価格が残っている、または長期間動作していなかった場合の対策）
+                try:
+                    if watch_ref is not None and latest_price_now is not None:
+                        ratio = float(latest_price_now) / float(watch_ref)
+                        # 現在価格がwatch_refの2倍以上、または0.5倍以下の場合は異常とみなす
+                        if ratio > 2.0 or ratio < 0.5:
+                            old_ref = watch_ref
+                            watch_ref = float(latest_price_now)
+                            state['watch_reference'] = watch_ref
+                            save_state(state)
+                            print(f"⚠️ watch_reference が現在価格と大きく乖離していたため自動修正: {old_ref:.0f}円 → {watch_ref:.0f}円")
+                except Exception as e:
+                    print(f"⚠️ watch_reference 自動修正中にエラー: {e}")
+
                 do_buy_by_pct = False
                 try:
                     if latest_price_now is not None and watch_ref is not None:
+                        # 20%下落で買い（上昇は売りなので買わない）
                         threshold_buy = watch_ref * (1.0 - float(TRADE_TRIGGER_PCT) / 100.0)
+                        
+                        # 20%下落ラインからさらに5%下落で買いチャンス通知
+                        further_drop_threshold = threshold_buy * 0.95  # 20%下落からさらに5%下落
+                        
+                        # 下落で買い
                         do_buy_by_pct = float(latest_price_now) <= float(threshold_buy)
-                        print(f"DEBUG: watch_ref={watch_ref}, threshold_buy={threshold_buy}, latest={latest_price_now}, do_buy_by_pct={do_buy_by_pct}")
+                        
+                        # 買いチャンス通知（20%下落 + さらに5%下落 = 合計24%下落）
+                        if float(latest_price_now) <= float(further_drop_threshold):
+                            # 重複通知防止
+                            last_buy_alert = state.get('last_buy_opportunity_alert') if isinstance(state, dict) else None
+                            should_alert = True
+                            if last_buy_alert:
+                                try:
+                                    # 前回通知から5%以上変動していれば再通知
+                                    prev_change = abs((float(latest_price_now) - float(last_buy_alert)) / float(last_buy_alert)) * 100.0
+                                    if prev_change < 5.0:
+                                        should_alert = False
+                                except Exception:
+                                    pass
+                            
+                            if should_alert:
+                                print(f"🎯 買いチャンス！ watch_ref={watch_ref:.0f}円から24%下落 → 現在={latest_price_now:.0f}円")
+                                
+                                # メール通知
+                                try:
+                                    smtp_host = os.getenv('SMTP_HOST')
+                                    smtp_port = int(os.getenv('SMTP_PORT', '587'))
+                                    smtp_user = os.getenv('SMTP_USER')
+                                    smtp_password = os.getenv('SMTP_PASS')
+                                    email_to = os.getenv('TO_EMAIL')
+                                    
+                                    if smtp_host and email_to:
+                                        drop_percent = ((float(latest_price_now) - watch_ref) / watch_ref) * 100.0
+                                        subject = f"🎯 BTC買いチャンス！ {abs(drop_percent):.1f}%下落"
+                                        message = f"""
+🎯 BTC買いチャンスです！
+
+【価格情報】
+基準価格: {watch_ref:,.0f}円
+20%下落ライン: {threshold_buy:,.0f}円
+現在価格: {latest_price_now:,.0f}円
+下落率: {drop_percent:.2f}%
+
+【推奨アクション】
+✅ bitbankに資金を入金してください
+✅ 入金後、Botが自動的にBTCを購入します
+✅ 購入価格から20%上昇で自動売却されます
+
+大きな下落のチャンスです！
+"""
+                                        send_notification(smtp_host, smtp_port, smtp_user, smtp_password,
+                                                        email_to, subject, message)
+                                        print(f"📧 買いチャンス通知メール送信完了")
+                                        
+                                        # 通知記録
+                                        try:
+                                            state['last_buy_opportunity_alert'] = float(latest_price_now)
+                                            save_state(state)
+                                        except Exception:
+                                            pass
+                                except Exception as e:
+                                    print(f"⚠️ 買いチャンス通知メール送信エラー: {e}")
+                        
+                        if do_buy_by_pct:
+                            print(f"📉 買いシグナル(下落): watch_ref={watch_ref:.0f}円, 下落閾値={threshold_buy:.0f}円, 現在={latest_price_now:.0f}円")
+                        else:
+                            print(f"DEBUG: watch_ref={watch_ref:.0f}円, 下落閾値={threshold_buy:.0f}円, 現在={latest_price_now:.0f}円, do_buy={do_buy_by_pct}")
                 except Exception:
                     do_buy_by_pct = False
 
@@ -2948,7 +3506,115 @@ if __name__ == "__main__":
                 pass
     else:
         while True:
-            # 事前トップアップ（安全な段階的入金）: 残高が閾値未満なら段階的に入金
+            # 💡 価格変動チェック: 20%変動時にメール通知
+            try:
+                latest_price = get_latest_price(exchange, 'BTC/JPY')
+                # 基準価格を state から取得
+                state = load_state()
+                reference_price = None
+                try:
+                    reference_price = float(state.get('watch_reference')) if isinstance(state, dict) and state.get('watch_reference') else None
+                except Exception:
+                    pass
+                
+                # 基準価格がない場合は環境変数から取得
+                if reference_price is None:
+                    try:
+                        reference_price = float(os.getenv('PRICE_REFERENCE', '15000000'))  # デフォルト1500万円
+                    except Exception:
+                        reference_price = 15000000.0
+                
+                # 価格変動率を計算（上昇も下落も検知）
+                price_change_percent = 0.0
+                if latest_price and reference_price and reference_price > 0:
+                    price_change_percent = ((latest_price - reference_price) / reference_price) * 100.0
+                    
+                    # 20%変動の閾値（環境変数で変更可能）
+                    try:
+                        trigger_percent = float(os.getenv('PRICE_ALERT_PERCENT', '20.0'))
+                    except Exception:
+                        trigger_percent = 20.0
+                    
+                    # メール通知フラグを state から取得（重複通知防止）
+                    last_alert_price = state.get('last_alert_price') if isinstance(state, dict) else None
+                    
+                    # 20%以上の変動を検知
+                    if abs(price_change_percent) >= trigger_percent:
+                        # 前回と異なる価格帯での通知か確認（同じ価格帯で何度も通知しない）
+                        should_alert = True
+                        if last_alert_price:
+                            try:
+                                # 前回の通知価格から5%以上変動していれば再通知
+                                prev_change = abs((latest_price - float(last_alert_price)) / float(last_alert_price)) * 100.0
+                                if prev_change < 5.0:
+                                    should_alert = False
+                            except Exception:
+                                pass
+                        
+                        if should_alert:
+                            direction = "上昇" if price_change_percent > 0 else "下落"
+                            emoji = "📈" if price_change_percent > 0 else "📉"
+                            
+                            print(f"{emoji} 大幅価格{direction}検知: {abs(price_change_percent):.2f}% (基準:{reference_price:.0f}円 → 現在:{latest_price:.0f}円)")
+                            
+                            # メール通知を送信
+                            try:
+                                smtp_host = os.getenv('SMTP_HOST')
+                                smtp_port = int(os.getenv('SMTP_PORT', '587'))
+                                smtp_user = os.getenv('SMTP_USER')
+                                smtp_password = os.getenv('SMTP_PASS')
+                                email_to = os.getenv('TO_EMAIL')
+                                
+                                if smtp_host and email_to:
+                                    subject = f"🚨 BTC価格{direction}アラート: {abs(price_change_percent):.1f}%変動"
+                                    
+                                    # 現在の残高情報を取得
+                                    current_balance = "不明"
+                                    try:
+                                        bal = float(fund_manager.available_fund())
+                                        current_balance = f"{bal:.0f}円"
+                                    except Exception:
+                                        pass
+                                    
+                                    message = f"""
+BTC価格が大きく{direction}しました！
+
+【価格情報】
+基準価格: {reference_price:,.0f}円
+現在価格: {latest_price:,.0f}円
+変動率: {price_change_percent:+.2f}%
+
+【残高情報】
+利用可能残高: {current_balance}
+
+【推奨アクション】
+{'✅ 買いのチャンス！安値で購入できます' if price_change_percent < 0 else '✅ 利確のチャンス！高値で売却できます'}
+
+{'残高が不足している場合は入金してください。' if price_change_percent < 0 else ''}
+
+Botは自動で取引を試みますが、残高を確認して必要に応じて手動で入金してください。
+"""
+                                    
+                                    send_notification(smtp_host, smtp_port, smtp_user, smtp_password, 
+                                                    email_to, subject, message)
+                                    print(f"📧 価格{direction}通知メール送信完了")
+                                    
+                                    # 通知済み価格を記録（重複通知防止）
+                                    try:
+                                        state['last_alert_price'] = float(latest_price)
+                                        save_state(state)
+                                    except Exception:
+                                        pass
+                            except Exception as e:
+                                print(f"⚠️ メール通知送信エラー: {e}")
+                            
+            except Exception as e:
+                try:
+                    log_warn(f"⚠️ 価格チェックエラー: {e}")
+                except Exception:
+                    pass
+            
+            # 通常の自動入金（残高不足時のみ）
             try:
                 if deposit_amount and deposit_amount > 0:
                     try:
@@ -2956,40 +3622,103 @@ if __name__ == "__main__":
                     except Exception:
                         current = None
 
-                    # 目標残高: 環境変数 TOPUP_TARGET があればそれを使い、無ければ閾値の2倍を目標にする
-                    try:
-                        topup_target = float(os.getenv('TOPUP_TARGET', str(min_balance_threshold * 2)))
-                    except Exception:
-                        topup_target = min_balance_threshold * 2
-
-                    if current is None:
-                        # available_fund が使えない場合は通常の自動入金を行う
+                    if current is not None and current < min_balance_threshold:
                         fund_manager.add_funds(deposit_amount)
-                        print(f"💳 自動入金(保険): {deposit_amount:.2f} 円 → 残高: {fund_manager.available_fund():.2f} 円")
-                    else:
-                        if current < min_balance_threshold:
-                            # 実際に入金する額は、目標との差分と deposit_amount の小さい方
-                            to_add = min(deposit_amount, max(0.0, topup_target - current))
-                            if to_add > 0:
-                                fund_manager.add_funds(to_add)
-                                try:
-                                    log_info(f"💳 閾値以下のため自動入金: {to_add:.2f} 円 → 残高: {fund_manager.available_fund():.2f} 円 (閾値: {min_balance_threshold:.2f}, 目標: {topup_target:.2f})")
-                                except Exception:
-                                    try:
-                                        print(f"💳 閾値以下のため自動入金: {to_add:.2f} 円 → 残高: {fund_manager.available_fund():.2f} 円 (閾値: {min_balance_threshold:.2f}, 目標: {topup_target:.2f})")
-                                    except Exception:
-                                        pass
-                            else:
-                                try:
-                                    log_info(f"ℹ️ 自動入金は不要（目標残高に達しています）: 現在 {current:.2f} 円, 目標 {topup_target:.2f} 円")
-                                except Exception:
-                                    try:
-                                        print(f"ℹ️ 自動入金は不要（目標残高に達しています）: 現在 {current:.2f} 円, 目標 {topup_target:.2f} 円")
-                                    except Exception:
-                                        pass
+                        try:
+                            log_info(f"💳 残高不足のため自動入金: {deposit_amount:.2f} 円 → 残高: {fund_manager.available_fund():.2f} 円")
+                        except Exception:
+                            print(f"💳 残高不足のため自動入金: {deposit_amount:.2f} 円 → 残高: {fund_manager.available_fund():.2f} 円")
 
             except Exception as e:
                 print(f"⚠️ 自動入金処理中にエラーが発生しました: {e}")
+
+            # 💰 bitbank残高増加検知 → 入金額全額で自動購入
+            try:
+                state = load_state()
+                balance = exchange.fetch_balance()
+                current_jpy = float(balance['JPY']['free']) if balance and 'JPY' in balance else 0.0
+                
+                # 前回のJPY残高を取得
+                last_jpy = state.get('last_jpy_balance', 0.0) if isinstance(state, dict) else 0.0
+                
+                # 残高が増加していたら自動購入（1000円以上の増加で購入）
+                if current_jpy > last_jpy + 1000:
+                    deposit_detected = current_jpy - last_jpy
+                    latest_price = get_latest_price(exchange, 'BTC/JPY')
+                    
+                    if latest_price and latest_price > 0:
+                        # 入金額全額でBTC購入（手数料考慮で99%使用）
+                        buy_jpy = deposit_detected * 0.99
+                        buy_amount_btc = buy_jpy / latest_price
+                        
+                        # 最小注文単位チェック（0.0001BTC以上）
+                        if buy_amount_btc >= 0.0001:
+                            print(f"💰 残高増加検知: {last_jpy:.0f}円 → {current_jpy:.0f}円 (+{deposit_detected:.0f}円)")
+                            print(f"🛒 自動購入開始: {buy_amount_btc:.4f} BTC @ {latest_price:.0f}円 (約{buy_jpy:.0f}円分)")
+                            
+                            try:
+                                if not DRY_RUN:
+                                    # bitbankは成行注文をサポートしていないため、指値注文を使用
+                                    # 現在価格より少し高めの価格で指値注文（すぐに約定させる）
+                                    limit_price = latest_price * 1.01  # 1%高めの価格
+                                    order = exchange.create_limit_buy_order('BTC/JPY', buy_amount_btc, limit_price)
+                                    print(f"✅ 購入成功: {order}")
+                                    
+                                    # 購入価格をwatch_referenceに設定
+                                    state['watch_reference'] = latest_price
+                                    state['last_jpy_balance'] = current_jpy - buy_jpy
+                                    save_state(state)
+                                    
+                                    # 購入通知メール
+                                    try:
+                                        smtp_host = os.getenv('SMTP_HOST')
+                                        smtp_port = int(os.getenv('SMTP_PORT', '587'))
+                                        smtp_user = os.getenv('SMTP_USER')
+                                        smtp_password = os.getenv('SMTP_PASS')
+                                        email_to = os.getenv('TO_EMAIL')
+                                        
+                                        if smtp_host and email_to:
+                                            subject = f"✅ BTC自動購入完了: {buy_amount_btc:.4f} BTC"
+                                            message = f"""
+✅ BTC自動購入が完了しました！
+
+【購入情報】
+購入数量: {buy_amount_btc:.4f} BTC
+購入価格: {latest_price:,.0f}円/BTC
+購入金額: 約{buy_jpy:,.0f}円
+
+【売却目標】
+目標価格: {latest_price * 1.2:,.0f}円 (20%上昇)
+予想利益: 約{buy_jpy * 0.2:,.0f}円
+
+自動売却をお待ちください！
+"""
+                                            send_notification(smtp_host, smtp_port, smtp_user, smtp_password,
+                                                            email_to, subject, message)
+                                            print(f"📧 購入完了通知メール送信")
+                                    except Exception as e:
+                                        print(f"⚠️ 購入通知メール送信エラー: {e}")
+                                else:
+                                    print(f"[DRY RUN] 購入をスキップ: {buy_amount_btc:.4f} BTC @ {latest_price:.0f}円")
+                                    state['last_jpy_balance'] = current_jpy
+                                    save_state(state)
+                            except Exception as e:
+                                print(f"⚠️ 自動購入失敗: {e}")
+                                # 失敗しても残高は更新しておく
+                                state['last_jpy_balance'] = current_jpy
+                                save_state(state)
+                        else:
+                            print(f"⚠️ 購入数量不足: {buy_amount_btc:.6f} BTC (最小: 0.0001 BTC)")
+                            state['last_jpy_balance'] = current_jpy
+                            save_state(state)
+                else:
+                    # 残高更新（増加していない場合も記録）
+                    if last_jpy == 0.0:
+                        # 初回起動時は現在残高を記録
+                        state['last_jpy_balance'] = current_jpy
+                        save_state(state)
+            except Exception as e:
+                print(f"⚠️ 残高チェック・自動購入処理中にエラー: {e}")
 
             run_bot(exchange, fund_manager)
 
