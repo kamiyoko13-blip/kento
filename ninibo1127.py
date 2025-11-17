@@ -2,8 +2,9 @@
 # === 必要なライブラリを1回ずつインポート（心臓部の準備） ===
 
 import os
-from dotenv import load_dotenv
-load_dotenv('/home/ninitan/.secrets/.env', override=True)
+import logging
+
+
 # ccxt がインストールされていない環境でもファイルが読み込めるよう、フォールバックのスタブを用意します。
 try:
     import ccxt  # type: ignore
@@ -2545,8 +2546,8 @@ def run_bot(exchange, fund_manager_instance):
         reserved_budget = min(allowed_by_percent, allowed_by_buffer)
     else:
         reserved_budget = 0.0
-    print(f"💰 1回あたりの注文予算: {reserved_budget:.2f} 円")
-    print(f"📉 最低注文数量: {MIN_ORDER_BTC} BTC")
+    log_info(f"💰 1回あたりの注文予算: {reserved_budget:.2f} 円")
+    log_info(f"📉 最低注文数量: {MIN_ORDER_BTC} BTC")
 
     # --- 取引所の残高情報を取得して表示（少額運用向けに簡潔に） ---
     try:
@@ -2555,7 +2556,7 @@ def run_bot(exchange, fund_manager_instance):
             jpy_free = balance_info['free'].get('JPY', 0)
             btc_free = balance_info['free'].get('BTC', 0)
             # 少額運用では利用可能額のみ表示（総額は省略）
-            print(f"💼 利用可能残高: JPY={jpy_free:.0f}円, BTC={btc_free:.8f}BTC")
+            log_info(f"💼 利用可能残高: JPY={jpy_free:.0f}円, BTC={btc_free:.8f}BTC")
     except Exception as e:
         try:
             log_warn(f"⚠️ 残高取得に失敗: {e}")
@@ -2566,10 +2567,10 @@ def run_bot(exchange, fund_manager_instance):
     try:
         open_orders = get_open_orders(exchange, pair)
         if open_orders:
-            print(f"📋 未約定注文: {len(open_orders)}件")
+            log_info(f"📋 未約定注文: {len(open_orders)}件")
             # 少額運用では最大2件まで表示
             for order in open_orders[:2]:
-                print(f"  {order['side'].upper()} {order['amount']:.4f}BTC @ {order['price']:.0f}円")
+                log_info(f"  {order['side'].upper()} {order['amount']:.4f}BTC @ {order['price']:.0f}円")
     except Exception as e:
         try:
             log_warn(f"⚠️ アクティブ注文取得に失敗: {e}")
@@ -2580,11 +2581,11 @@ def run_bot(exchange, fund_manager_instance):
     try:
         my_trades = get_my_trades(exchange, pair, limit=5)
         if my_trades:
-            print(f"💱 最近の約定: {len(my_trades)}件")
+            log_info(f"💱 最近の約定: {len(my_trades)}件")
             # 少額運用では最新2件のみ簡潔に表示
             for trade in my_trades[:2]:
                 fee_cost = trade.get('fee', {}).get('cost', 0) if trade.get('fee') else 0
-                print(f"  {trade['side'].upper()} {trade['amount']:.4f}BTC @ {trade['price']:.0f}円 (手数料:{fee_cost:.2f}円)")
+                log_info(f"  {trade['side'].upper()} {trade['amount']:.4f}BTC @ {trade['price']:.0f}円 (手数料:{fee_cost:.2f}円)")
     except Exception as e:
         try:
             log_warn(f"⚠️ 約定履歴取得に失敗: {e}")
