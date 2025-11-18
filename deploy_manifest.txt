@@ -1,0 +1,26 @@
+# Deploy manifest: files/dirs recommended to copy to the remote deployment host
+# Do NOT upload any file that contains real secrets (.env, ~/.ssh, backups with real data).
+# Review this list locally before transferring; use WinSCP synchronize/preview and confirm.
+
+# Recommended files/directories (relative to project root)
+templates/.env.example
+systemd/notify_bot.env.sample
+systemd/notify_bot.service
+staging/ninibo1127.py
+scripts/run_dry.py    # smoke-test runner (may be at project root as run_dry.py)
+scripts/deploy_swap.ps1
+scripts/deploy_swap.sh
+tools/convert_prints_to_logs.py
+# optional tools
+tools/env_validator.py
+
+# docs and metadata
+requirements.txt
+README_PRODUCTION.md
+docs/
+
+# Exclude (do NOT transfer)
+# - Any .env files containing real credentials
+# - backups/ (unless you audited contents)
+# - *.pem, *.key, *.p12
+# - .git/ and .gitignore are optional but fine if you manage repo on remote

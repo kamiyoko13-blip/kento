@@ -1,0 +1,18 @@
+{
+  "watch_reference": 7200000.0,
+  "positions": [
+    {
+      "side": "buy",
+      "price": 0.0,
+      "qty": 0.0002,
+      "time": 1762786932
+    },
+    {
+      "side": "buy",
+      "price": 0.0,
+      "qty": 0.0002,
+      "time": 1762786983
+    }
+  ],
+  "last_buy_time": 1762791384
+}

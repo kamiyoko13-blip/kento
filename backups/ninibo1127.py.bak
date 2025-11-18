@@ -1,0 +1,1077 @@
+# python 3.14環境で動作確認済み (仮想環境venv314を使用)
+# === 必要なライブラリを1回ずつインポート（心臓部の準備） ===
+
+# ccxt がインストールされていない環境でもファイルが読み込めるよう、フォールバックのスタブを用意します。
+try:
+    import ccxt  # type: ignore
+except Exception:
+    # 最低限のインターフェースを持つスタブ実装
+    class AuthenticationError(Exception):
+        pass
+
+    class BitbankStub:
+        def __init__(self, config=None):
+            self.apiKey = (config or {}).get('apiKey')
+            self.secret = (config or {}).get('secret')
+
+        def fetch_balance(self):
+            # テスト用のダミー残高
+            return {'total': {'JPY': 0.0, 'BTC': 0.0}}
+
+        def fetch_ticker(self, pair):
+            # テスト用のダミー価格
+            return {'last': 0.0}
+
+        def fetch_ohlcv(self, pair, timeframe='1h', limit=250):
+            # 空のデータを返して呼び出し側で安全に扱えるようにする
+            return []
+
+        def create_order(self, pair, type_, side, amount, price=None):
+            # ダミー注文レスポンス
+            return {'id': 'stub_order', 'pair': pair, 'type': type_, 'side': side, 'amount': amount, 'price': price}
+
+    class _CCXTModule:
+        AuthenticationError = AuthenticationError
+        def bitbank(self, config=None):
+            return BitbankStub(config)
+
+    ccxt = _CCXTModule()
+
+# 後続コードが使うために名前を揃える
+# ccxt を直接参照する代わりに、このモジュール内で使う共通の例外参照を作成します。
+# 実環境では ccxt.AuthenticationError が存在します。スタブ環境では上で定義したものが入ります。
+AuthenticationError = getattr(ccxt, 'AuthenticationError', Exception)
+
+# 互換性対策: 一部のコードやライブラリは ccxt.base.errors.AuthenticationError を参照する
+# ことがあるため、ccxt.base.errors.AuthenticationError が存在しない場合は補完しておきます。
+try:
+    base_obj = getattr(ccxt, 'base', None)
+    if base_obj is None or not hasattr(base_obj, 'errors'):
+        class _BaseErrors:
+            pass
+        setattr(_BaseErrors, 'AuthenticationError', getattr(ccxt, 'AuthenticationError', Exception))
+
+        class _Base:
+            pass
+        setattr(_Base, 'errors', _BaseErrors)
+        setattr(ccxt, 'base', _Base)
+except Exception:
+    # 保険: 何か問題があれば無視して既存の AuthenticationError を使う
+    pass
+
+# funds モジュールが存在しても、外部の FundManager がこのスクリプトの期待する
+# メソッド (available_fund, place_order, add_funds) を持たない場合があるため、
+# 互換性チェックをして不一致なら内部スタブを使うようにします。
+def _make_internal_fund_manager_class():
+    class FundManagerStub:
+        def __init__(self, exchange=None, initial_fund=0):
+            self.exchange = exchange
+            self._available = float(initial_fund)
+
+        def available_fund(self):
+            return float(self._available)
+
+        def place_order(self, cost):
+            # 残高から差し引く簡易実装（テスト用）
+            try:
+                self._available = float(self._available) - float(cost)
+            except Exception:
+                pass
+
+        def add_funds(self, amount):
+            # 少額ずつ入金する機能（例: 毎時間定額入金など）
+            try:
+                self._available = float(self._available) + float(amount)
+            except Exception:
+                pass
+
+    return FundManagerStub
+
+_InternalFundManager = _make_internal_fund_manager_class()
+
+try:
+    from funds import FundManager as _ImportedFundManager  # type: ignore
+    # 簡易的な互換性チェック: クラスに想定するメソッドが存在するか
+    required = ('available_fund', 'place_order', 'add_funds')
+    if all(hasattr(_ImportedFundManager, name) for name in required):
+        FundManager = _ImportedFundManager
+    else:
+        # 互換性なし → 内部スタブを利用
+        FundManager = _InternalFundManager
+except Exception:
+    # インポート失敗時は内部スタブを利用
+    FundManager = _InternalFundManager
+
+fund_manager = FundManager(initial_fund=0.0)
+
+
+def _adapt_fund_manager_instance(fm):
+    """
+    Wrap an external FundManager instance so it exposes the small API
+    this script expects: available_fund(), place_order(cost), add_funds(amount).
+    If the passed object already has these methods, return it unchanged.
+    Otherwise return an adapter that attempts to call the underlying
+    implementation when possible and falls back to an internal counter.
+    """
+    # If fm already implements the required API, return it
+    if all(hasattr(fm, name) for name in ('available_fund', 'place_order', 'add_funds')):
+        return fm
+
+    class _Adapter:
+        def __init__(self, underlying, initial=0.0):
+            self._u = underlying
+            # internal fallback balance
+            try:
+                self._available = float(initial)
+            except Exception:
+                self._available = 0.0
+
+        def available_fund(self):
+            # try a variety of possible backing attributes/methods
+            try:
+                if hasattr(self._u, 'available_fund'):
+                    return float(self._u.available_fund())
+                if hasattr(self._u, 'total_fund'):
+                    val = getattr(self._u, 'total_fund')
+                    return float(val() if callable(val) else val)
+                if hasattr(self._u, 'get_total'):
+                    return float(self._u.get_total())
+                if hasattr(self._u, 'balance'):
+                    b = getattr(self._u, 'balance')
+                    if callable(b):
+                        b = b()
+                    # try common shapes
+                    if isinstance(b, dict):
+                        # try JPY key
+                        try:
+                            return float(b.get('JPY') or b.get('jpy') or 0.0)
+                        except Exception:
+                            return float(0.0)
+                    try:
+                        return float(b)
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+            return float(self._available)
+
+        def place_order(self, cost):
+            try:
+                if hasattr(self._u, 'place_order'):
+                    return self._u.place_order(cost)
+            except Exception:
+                # fall through to internal handling
+                pass
+            try:
+                self._available = float(self._available) - float(cost)
+            except Exception:
+                pass
+
+        def add_funds(self, amount):
+            try:
+                if hasattr(self._u, 'add_funds'):
+                    return self._u.add_funds(amount)
+            except Exception:
+                pass
+            try:
+                self._available = float(self._available) + float(amount)
+            except Exception:
+                pass
+
+    return _Adapter(fm, initial=getattr(fm, '_available', 0.0) if fm is not None else 0.0)
+
+import os
+import time
+import datetime
+import math
+try:
+    from filelock import FileLock
+except Exception:
+    # Minimal FileLock fallback using fcntl for Unix-like systems
+    try:
+        import fcntl
+
+        class FileLock:
+            def __init__(self, path, timeout=None):
+                self.path = path
+                self.timeout = timeout
+                self.fd = None
+
+            def __enter__(self):
+                start = time.time()
+                while True:
+                    try:
+                        # open file for writing (create if not exists)
+                        self.fd = open(self.path, 'w')
+                        # try to acquire non-blocking exclusive lock
+                        fcntl.flock(self.fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                        return self
+                    except BlockingIOError:
+                        # timeout handling
+                        if self.timeout is not None and (time.time() - start) >= float(self.timeout):
+                            raise TimeoutError(f"Timeout acquiring lock {self.path}")
+                        time.sleep(0.05)
+
+            def __exit__(self, exc_type, exc, tb):
+                try:
+                    if self.fd:
+                        fcntl.flock(self.fd, fcntl.LOCK_UN)
+                        self.fd.close()
+                except Exception:
+                    pass
+
+    except Exception:
+        # Last-resort dummy lock (no-op) for non-Unix platforms; safer to install filelock package
+        class FileLock:
+            def __init__(self, path, timeout=None):
+                self.path = path
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return
+try:
+    import pandas as pd  # type: ignore
+except Exception:
+    # Minimal pandas-like stub to avoid import errors and provide the small API used in this script.
+    # NOTE: This is a lightweight compatibility shim for parsing/testing and does NOT replace real pandas.
+    class Series:
+        def __init__(self, values):
+            self.values = list(values) if values is not None else []
+            self._window = None
+
+        def rolling(self, window):
+            self._window = int(window)
+            return self
+
+        def mean(self):
+            vals = self.values
+            w = self._window or 1
+            if not vals:
+                return []
+            res = []
+            for i in range(len(vals)):
+                if i + 1 < w:
+                    res.append(None)
+                else:
+                    window_vals = [v for v in vals[i + 1 - w:i + 1] if v is not None]
+                    res.append(sum(window_vals) / len(window_vals) if window_vals else None)
+            return res
+
+        def __iter__(self):
+            return iter(self.values)
+
+    class Row:
+        def __init__(self, data):
+            self._data = data or {}
+
+        def __getitem__(self, key):
+            return self._data.get(key)
+
+        def __getattr__(self, name):
+            if name in self._data:
+                return self._data[name]
+            raise AttributeError(name)
+
+    class DataFrame:
+        def __init__(self, data=None, columns=None):
+            # data: list of lists (rows) or list of dicts
+            self._columns = list(columns) if columns else []
+            self._rows = []
+            if data:
+                if self._columns and all(isinstance(r, (list, tuple)) for r in data):
+                    for row in data:
+                        self._rows.append({c: v for c, v in zip(self._columns, row)})
+                elif all(isinstance(r, dict) for r in data):
+                    self._rows = [dict(r) for r in data]
+                    if not self._columns:
+                        cols = set()
+                        for r in self._rows:
+                            cols.update(r.keys())
+                        self._columns = list(cols)
+                else:
+                    # fallback: single column
+                    col = self._columns[0] if self._columns else "data"
+                    for r in data:
+                        self._rows.append({col: r})
+            self.index = None
+
+        def __len__(self):
+            return len(self._rows)
+
+        def __getitem__(self, key):
+            if isinstance(key, str):
+                vals = [row.get(key) for row in self._rows]
+                return Series(vals)
+            raise KeyError(key)
+
+        def __setitem__(self, key, value):
+            # value can be Series or iterable; align by index
+            vals = list(value) if hasattr(value, '__iter__') and not isinstance(value, (str, bytes)) else [value] * len(self._rows)
+            if not self._rows and vals:
+                for v in vals:
+                    self._rows.append({key: v})
+            else:
+                for i, v in enumerate(vals):
+                    if i < len(self._rows):
+                        self._rows[i][key] = v
+                    else:
+                        self._rows.append({key: v})
+            if key not in self._columns:
+                self._columns.append(key)
+
+        @property
+        def iloc(self):
+            class _Loc:
+                def __init__(self, rows):
+                    self._rows = rows
+
+                def __getitem__(self, idx):
+                    return Row(self._rows[idx])
+            return _Loc(self._rows)
+
+        def set_index(self, key):
+            self.index = key
+            return self
+
+    def to_datetime(values, unit='ms'):
+        out = []
+        for v in values:
+            try:
+                if v is None:
+                    out.append(None)
+                    continue
+                if unit == 'ms':
+                    ts = float(v) / 1000.0
+                else:
+                    ts = float(v)
+                out.append(datetime.datetime.fromtimestamp(ts))
+            except Exception:
+                out.append(None)
+        return out
+
+    import types
+    pd = types.SimpleNamespace(DataFrame=DataFrame, to_datetime=to_datetime)
+
+from zoneinfo import ZoneInfo  # 標準ライブラリのタイムゾーン処理
+# dotenv がインストールされていない環境でもファイルが読み込めるよう、フォールバックのスタブを用意します。
+
+try:
+    from dotenv import load_dotenv  # type: ignore[reportMissingImports]
+except Exception:
+    # minimal stub for load_dotenv to allow .env loading when python-dotenv is not installed
+    def load_dotenv(dotenv_path=None):
+        """
+        Very small implementation that reads KEY=VALUE lines from a file and sets os.environ entries.
+        Returns True if a file was read, False otherwise.
+        """
+        if not dotenv_path or not os.path.exists(dotenv_path):
+            return False
+        try:
+            with open(dotenv_path, 'r', encoding='utf-8') as f:
+                for line in f:
+                    line = line.strip()
+                    if not line or line.startswith('#'):
+                        continue
+                    if '=' in line:
+                        k, v = line.split('=', 1)
+                        k = k.strip()
+                        v = v.strip()
+                        # strip optional surrounding quotes
+                        if (v.startswith('"') and v.endswith('"')) or (v.startswith("'") and v.endswith("'")):
+                            v = v[1:-1]
+                        # do not overwrite existing environment variables
+                        os.environ.setdefault(k, v)
+            return True
+        except Exception:
+            return False
+
+
+# === .envファイルの読み込み（複数の場所を試す） ===
+# systemd サービスでは EnvironmentFile が優先されるが、
+# 手動実行時は .env ファイルを読み込む
+env_paths = [
+    '/home/ninitan/.secrets/.env',  # systemd で使用
+    '.env',                         # プロジェクト直下
+    'config.env'                    # 旧形式
+]
+
+env_loaded = False
+for env_path in env_paths:
+    if load_dotenv(dotenv_path=env_path):
+        print(f"✅ 環境変数を {env_path} から読み込みました")
+        env_loaded = True
+        break
+
+if not env_loaded:
+    print("⚠️ .env ファイルが見つかりません。環境変数は systemd EnvironmentFile から読み込まれます。")
+
+# グローバルに使う API キーを一度だけ読み込む
+API_KEY = os.getenv("API_KEY")
+SECRET_KEY = os.getenv("SECRET_KEY")
+
+# 日本標準時 (JST) のタイムゾーンオブジェクトを作成
+JST = ZoneInfo('Asia/Tokyo')
+
+# === 環境変数の取得（実行時チェック用にグローバル変数として定義） ===
+smtp_user = os.getenv("SMTP_USER")
+smtp_password = os.getenv("SMTP_PASS")  # .env.newに合わせてSMTP_PASSに変更
+email_to = os.getenv("TO_EMAIL")  # .env.newに合わせてTO_EMAILに変更
+smtp_host = os.getenv("SMTP_HOST")  # キー名を取得する変数を smtp_host に変更
+# モジュールレベルでのチェックを削除（実行時にチェックするように変更）
+
+subject = os.getenv("SUBJECT", "📬 通知")
+
+# === SMTP_PORT の安全な読み込み ===
+# デフォルトを 465 (SMTPS) にしておきます。環境変数があればそれを使い、整数変換に失敗したら 465 にフォールバックします。
+port_str = os.getenv("SMTP_PORT", "465")
+try:
+    smtp_port = int(port_str)
+except Exception:
+    smtp_port = 465
+
+# === メール送信関数 ===
+def send_notification(smtp_host, smtp_port, smtp_user, smtp_password, to, subject, body):
+    from email.mime.text import MIMEText
+    import smtplib
+
+    msg = MIMEText(body)
+    msg["Subject"] = subject
+    msg["From"] = smtp_user
+    msg["To"] = to
+
+    # 環境変数またはポートによる SMTPS 判定
+    use_ssl_env = os.getenv("SMTP_USE_SSL")
+    if use_ssl_env is None:
+        # 明示指定がなければポートが 465 の場合は SSL を使う
+        use_ssl = (int(smtp_port) == 465)
+    else:
+        use_ssl = str(use_ssl_env).lower() in ("1", "true", "yes", "on")
+
+    try:
+        if use_ssl:
+            # SMTPS (implicit TLS)
+            with smtplib.SMTP_SSL(smtp_host, smtp_port) as server:
+                server.login(smtp_user, smtp_password)
+                server.send_message(msg)
+        else:
+            # StartTLS を使う通常の接続
+            with smtplib.SMTP(smtp_host, smtp_port) as server:
+                server.starttls()
+                server.login(smtp_user, smtp_password)
+                server.send_message(msg)
+
+        print("✅ メール送信成功")
+    except Exception as e:
+        print(f"❌ メール送信失敗: {e}")
+
+
+# 取引所の設定を取得
+exchange_name = os.getenv("EXCHANGE", "bitbank")
+
+
+# === メイン処理開始（Botの心臓が動き出す） ===
+if __name__ == "__main__":
+    print("Bot起動中...")
+    # run_botの定義後に呼び出すように移動しました
+
+# 1. 初期設定と認証 (APIキーの読み込みはここにあります)
+
+# .envファイルからAPIキーを読み込みます（config.envから統合済み）
+
+ 
+# ※注意: APIキー読み込みと bitbank インスタンスの直接作成は
+# connect_to_bitbank() に統合しました。元の直接作成コードを削除しています。
+# 必要であれば、環境変数の確認は connect_to_bitbank() 呼び出し時に行われます。
+
+# 旧来の直接接続テスト/監視ループは削除しました。
+# 取引所接続とループは connect_to_bitbank() と run_bot() に統合されています。
+
+
+# ==========================================================
+# 🔑 2. グローバルキー読み込みと定義 (修正点: 最上部に移動)
+# ==========================================================
+#.env# config.envからAPIキーを読み込みます
+
+load_dotenv(dotenv_path='.env') 
+API_KEY = os.getenv("API_KEY") # グローバル定数として定義
+SECRET_KEY = os.getenv("SECRET_KEY") # グローバル定数として定義
+
+# 日本標準時 (JST) のタイムゾーンオブジェクトを作成
+JST = ZoneInfo('Asia/Tokyo')
+
+# --- dry-run / test stub support ---
+# 環境変数 DRY_RUN が真なら実際のネットワーク呼び出しや注文を行わないスタブを使います。
+DRY_RUN = str(os.getenv('DRY_RUN', '0')).lower() in ('1', 'true', 'yes', 'on')
+try:
+    DRY_RUN_PRICE = float(os.getenv('DRY_RUN_PRICE', '5000000'))
+except Exception:
+    DRY_RUN_PRICE = 5000000.0
+
+class ExchangeStub:
+    """軽量な取引所スタブ: dry-run 用。実ネットワーク呼び出しを行いません。"""
+    def __init__(self, price=None):
+        try:
+            self._price = float(price) if price is not None else DRY_RUN_PRICE
+        except Exception:
+            self._price = DRY_RUN_PRICE
+
+    def fetch_balance(self):
+        return {'total': {'JPY': 100000.0, 'BTC': 0.0}}
+
+    def fetch_ticker(self, pair):
+        return {'last': self._price}
+
+    def fetch_ohlcv(self, pair, timeframe='1h', limit=250):
+        return []
+
+    def create_order(self, pair, type_, side, amount, price=None):
+        cost = None
+        try:
+            p = float(price) if price is not None else float(self._price)
+            cost = float(amount) * p
+        except Exception:
+            cost = None
+        return {'id': 'dry_order', 'pair': pair, 'type': type_, 'side': side, 'amount': amount, 'price': price, 'cost': cost}
+
+
+# === 1. 取引所への接続 ===
+# 修正点: グローバルキーを使用するため引数を削除し、冗長なコードを削除
+def connect_to_bitbank():
+    """bitbankに接続します。グローバルで読み込んだAPIキーを使用します。"""
+    try:
+        # dry-run が有効な場合はネットワークを使わないスタブを返す
+        if str(os.getenv('DRY_RUN', '0')).lower() in ('1', 'true', 'yes', 'on'):
+            price = os.getenv('DRY_RUN_PRICE')
+            try:
+                price = float(price) if price is not None else None
+            except Exception:
+                price = None
+            print("🔧 DRY_RUN enabled — using ExchangeStub (no network calls).")
+            return ExchangeStub(price)
+
+        # API_KEYとSECRET_KEYはファイルの最上部で既に読み込まれている
+        if not API_KEY or not SECRET_KEY:
+            print("エラー：APIキーまたはシークレットキーが未定義です。config.envを確認してください。")
+            return None
+
+        # ccxtを使ってbitbankに接続
+        exchange = ccxt.bitbank({
+            'apiKey': API_KEY,
+            'secret': SECRET_KEY,
+        })
+        print("✅ bitbankにccxtで認証接続しました。")
+        return exchange
+
+    except Exception as e:
+        print(f"❌ bitbankへの接続中にエラーが発生しました: {e}")
+        return None
+     
+        print("✅ bitbankにccxtで認証接続しました。")
+        return exchange    
+
+# === 2. 価格データの取得 ===
+def get_ohlcv(exchange, pair='BTC/JPY', timeframe='1h', limit=250):
+    """
+    指定した通貨ペアのOHLCVデータを取得します。(ccxt使用)
+    """
+    try:
+        ohlcv_data = exchange.fetch_ohlcv(pair, timeframe, limit=limit)
+
+        if ohlcv_data:
+            # データをDataFrameに変換
+            df = pd.DataFrame(ohlcv_data, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+            df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
+            df = df.set_index('timestamp')
+            return df
+        else:
+            print(f"{pair} のOHLCVデータを取得できませんでした。")
+            return None
+
+    except Exception as e:
+        print(f"OHLCVデータの取得中にエラーが発生しました: {e}")
+        return None
+
+# === 3. 売買シグナルの判定（MA 25/75/200 + 買い増しロジック） ===
+def generate_signals(df):
+    """
+    価格データに基づいて売買シグナルを生成します。
+    """
+    # データ数が200本必要
+    if df is None or len(df) < 200:
+        # エラーメッセージを改善
+        print(f"⚠️ データが不足しています。最低200本必要ですが、{len(df) if df is not None else 0}本しかありません。")
+        return None
+
+    # 短期25、中期75、長期200を追加
+    df['short_mavg'] = df['close'].rolling(window=25).mean()
+    df['mid_mavg'] = df['close'].rolling(window=75).mean() # 75をmidに名称変更
+    df['long_mavg'] = df['close'].rolling(window=200).mean() # 新しい長期MA
+
+    latest_data = df.iloc[-1]
+    previous_data = df.iloc[-2]
+
+    signal = None
+    message = None
+
+    # 🔑 トレンドフィルター
+    is_uptrend = latest_data['mid_mavg'] > latest_data['long_mavg']
+    mid_mavg_is_rising = latest_data['mid_mavg'] > previous_data['mid_mavg']
+
+    # --- 買いシグナル 1：新規エントリー (ゴールデンクロス) ---
+    if (previous_data['short_mavg'] <= previous_data['mid_mavg'] and
+        latest_data['short_mavg'] > latest_data['mid_mavg'] and
+        is_uptrend and mid_mavg_is_rising):
+        signal = 'buy_entry' # 新規エントリーシグナル
+        message = "✅ 新規エントリーシグナル (GC 25/75、トレンド確認) が発生しました。"
+        return signal, message
+
+    # --- 買いシグナル 2：買い増し (押し目) ---
+    # 注: GC後、ポジション保有中に価格がMA25を上回っている（押し目買い）でトレンド上昇中
+    elif latest_data['close'] > latest_data['short_mavg'] and is_uptrend:
+        signal = 'buy_add' 
+        message =  "📈 買い増しシグナル (押し目買い) が発生しました。"
+        
+    # --- 売りシグナル：全決済 (トレンド終了) ---
+    # MA75がMA200を下回った、またはMA75が下向きに転じた
+    elif not is_uptrend or latest_data['mid_mavg'] < previous_data['mid_mavg']:
+        signal = 'sell_all'
+        message = "❌ 全決済シグナル (長期トレンド終了/反転) が発生しました。"
+    
+    return signal, message
+
+
+# === 4. 注文の整形 ===
+
+def log_order(action, pair, amount, price=None):
+    """
+  注文内容を整形してログメッセージを返します。
+    """
+    msg = f"{action}注文: {amount:.4f} {pair.split('/')[0]} {'@ ' + str(price) if price else '（成行）'}"
+    print(msg)
+    return msg
+
+# === 5. 注文の実行 ===
+
+def execute_order(exchange, pair, order_type, amount, price=None):
+    """
+    Bitbankに注文を出します。(ccxt使用)
+    """
+    try:
+        order = None
+
+        # DRY_RUN の場合は実際の注文 API 呼び出しを行わず、シミュレーションを返す
+        if str(os.getenv('DRY_RUN', '0')).lower() in ('1', 'true', 'yes', 'on'):
+            # 価格が未指定なら DRY_RUN_PRICE を使う
+            try:
+                p = float(price) if price is not None else float(os.getenv('DRY_RUN_PRICE', str(DRY_RUN_PRICE)))
+            except Exception:
+                p = float(DRY_RUN_PRICE)
+            simulated_cost = None
+            try:
+                simulated_cost = float(amount) * p
+            except Exception:
+                simulated_cost = None
+
+            action_label = "💰 (DRY) 買い" if order_type == 'buy' else "💸 (DRY) 売り"
+            log_order(action_label, pair, amount, price)
+            simulated = {'id': 'dry_order', 'amount': amount, 'cost': simulated_cost}
+            print("ℹ️ DRY_RUN: 注文は実行されませんでした（シミュレーション）")
+            return simulated
+
+        if order_type == 'buy':
+            if price:
+                # 指定価格で成行ではなく指値注文を出す
+                order = exchange.create_order(pair, 'limit', 'buy', amount, price)
+            else:
+                # 価格が指定されていなければ成行注文
+                order = exchange.create_order(pair, 'market', 'buy', amount)
+            log_order("💰 買い", pair, amount, price)
+
+        elif order_type == 'sell':
+            if price:
+                order = exchange.create_order(pair, 'limit', 'sell', amount, price)
+            else:
+                order = exchange.create_order(pair, 'market', 'sell', amount)
+            log_order("💸 売り", pair, amount, price)
+
+        else:
+            print(f"無効な注文タイプです: {order_type}")
+            return None
+
+        if order and isinstance(order, dict) and 'id' in order:
+            print("注文成功:", order['id'])  # IDのみ表示に修正
+            return order
+        else:
+            print("注文に失敗しました:", order)
+            return None
+
+    except Exception as e:
+        import traceback
+        traceback.print_exc()  # ← これでエラーの詳細が表示されます
+
+        print(f"❌ 注文実行中にエラーが発生しました: {e}")
+        return None
+
+# === 6. メインループ（Botの実行部分） ===
+# 修正点: グローバルキーを使用するため、api_keyとsecret_keyの引数を削除
+def run_bot(exchange, fund_manager_instance):
+    """自動売買Botのメイン実行（1回分を実行する）。
+
+    この実装は次を満たします:
+    - 注文を出す前に最新残高を確認する
+    - 注文が成功したときのみ fund_manager.place_order(cost) により残高を差し引く
+    - DRY_RUN を尊重して、実運用時のみ API 呼び出しを行う
+    """
+    pair = 'BTC/JPY'
+    interval_seconds = 3600
+
+    # 実行時チェック: 必要な環境変数（メール等）は実行前に確認する
+    required_env_vars = ["SMTP_HOST", "SMTP_PORT", "SMTP_USER", "SMTP_PASS", "TO_EMAIL"]
+    # DRY_RUN でない場合は API キーも必須
+    env_dry_run = os.getenv("DRY_RUN", "").lower() in ["1", "true", "yes", "on"]
+    if not env_dry_run:
+        required_env_vars += ["API_KEY", "SECRET_KEY"]
+    missing_vars = [var for var in required_env_vars if not os.getenv(var)]
+    if missing_vars:
+        raise ValueError(f"以下の環境変数が .env に設定されていません: {', '.join(missing_vars)}")
+
+    # Exchange/FundManager の準備
+    if exchange is None:
+        exchange = connect_to_bitbank()
+    # adapter を通して安全に扱えるようにする
+    fund_manager = _adapt_fund_manager_instance(fund_manager_instance) if fund_manager_instance is not None else _adapt_fund_manager_instance(FundManager(initial_fund=float(os.getenv('INITIAL_FUND', '20000'))))
+
+    if not exchange and not env_dry_run:
+        print("API接続に失敗したためBotを停止します。")
+        return
+
+    print(f"Botを {pair} で実行します。データ取得間隔: {interval_seconds}秒 (1時間)")
+
+    JAPANESE_YEN_BUDGET = float(os.getenv('JAPANESE_YEN_BUDGET', '2000'))
+    MIN_ORDER_BTC = float(os.getenv('MIN_ORDER_BTC', '0.0001'))
+    # 小額運用向けの安全設定
+    # 1回の注文で使ってよい最大割合 (残高に対するパーセンテージ。例: 0.05 = 5%)
+    try:
+        MAX_RISK_PERCENT = float(os.getenv('MAX_RISK_PERCENT', '0.05'))
+    except Exception:
+        MAX_RISK_PERCENT = 0.05
+    # 注文後に常に残す最低バッファ (JPY)
+    try:
+        BALANCE_BUFFER = float(os.getenv('BALANCE_BUFFER', '1000'))
+    except Exception:
+        BALANCE_BUFFER = 1000.0
+
+    print(f"💰 1回あたりの注文予算: {JAPANESE_YEN_BUDGET} 円")
+    print(f"📉 最低注文数量: {MIN_ORDER_BTC} BTC")
+
+    try:
+        ticker = exchange.fetch_ticker(pair) if exchange else {'last': DRY_RUN_PRICE}
+        latest_price = ticker.get('last') if isinstance(ticker, dict) else None
+        if latest_price is None:
+            print("エラー: 価格が取得できませんでした。")
+            return
+        print(f"💵 最新の市場価格: {latest_price} 円")
+
+        buy_amount_raw = JAPANESE_YEN_BUDGET / latest_price
+        decimals = int(-math.log10(MIN_ORDER_BTC)) if MIN_ORDER_BTC < 1 else 0
+        buy_amount = math.floor(buy_amount_raw * (10**decimals)) / (10**decimals)
+        order_cost = buy_amount * latest_price
+
+        if buy_amount < MIN_ORDER_BTC:
+            print(f"ℹ️ 注文数量が最小取引単位を下回っています: {buy_amount} BTC (最小: {MIN_ORDER_BTC} BTC)")
+            return
+
+        print(f"✅ 注文可能: {buy_amount} BTC (約 {order_cost:.2f} 円)")
+
+    except Exception as e:
+        print(f"エラー: 最新価格の取得に失敗しました。Botを停止します: {e}")
+        return
+
+    # 注文前に最新残高を確認して、不足であればスキップする
+    try:
+        available = None
+        if hasattr(fund_manager, "available_fund"):
+            try:
+                available = float(fund_manager.available_fund())
+            except Exception:
+                available = None
+
+        if available is not None and available < order_cost:
+            print(f"🚫 残高不足のため注文をスキップします（必要: {order_cost:.2f} 円, 残高: {available:.2f} 円）")
+            return
+    except Exception as e:
+        print(f"🚫 残高チェック中にエラーが発生しました: {e}")
+        return
+
+    # 注文実行: ここでは「予約 (reserve)」戦略を採用します。
+    # 1) ロックを取得して残高を再確認 -> 残高を差し引いて予約
+    # 2) ロックを解放して実際の注文を発行
+    # 3) 注文失敗時はロック下で返金（予約取り消し）
+    LOCKFILE = os.getenv('ORDER_LOCKFILE', '/tmp/ninibo_order.lock')
+    LOCK_TIMEOUT = float(os.getenv('ORDER_LOCK_TIMEOUT', '10'))
+    reserved = False
+    try:
+        # 予約フェーズ: 価格変動に対応するため、"予算" を先に予約し
+        # 注文直前に最新価格を再取得して数量を再計算します。
+        # 小額運用向けに、残高の割合やバッファを尊重して予約額を決める
+        reserved_budget = JAPANESE_YEN_BUDGET
+        try:
+            # available を事前取得（lock の外での読み取りで概算を取る）
+            available_pre = float(fund_manager.available_fund()) if hasattr(fund_manager, 'available_fund') else None
+        except Exception:
+            available_pre = None
+
+        if available_pre is not None:
+            # 利用可能残高に対する上限 (割合)
+            allowed_by_percent = max(0.0, available_pre * float(MAX_RISK_PERCENT))
+            # 残しておく最低バッファを考慮
+            allowed_by_buffer = max(0.0, available_pre - float(BALANCE_BUFFER))
+            # 実際に予約する金額は、環境変数での予算と上限の小さい方
+            reserved_budget = min(float(JAPANESE_YEN_BUDGET), allowed_by_percent, allowed_by_buffer)
+            # 小額になりすぎないよう安全下限チェックはロック内で行う
+        with FileLock(LOCKFILE, timeout=LOCK_TIMEOUT):
+            try:
+                available = float(fund_manager.available_fund()) if hasattr(fund_manager, 'available_fund') else None
+            except Exception:
+                available = None
+
+            # 予約する額が妥当か（最小注文コストより小さい場合はスキップ）
+            try:
+                min_cost = MIN_ORDER_BTC * float(latest_price)
+            except Exception:
+                min_cost = 0.0
+
+            # 予算を予約するのに十分な残高があるか確認
+            if available is not None and available < reserved_budget:
+                print(f"🚫 残高不足のため注文をスキップします（必要: {reserved_budget:.2f} 円, 残高: {available:.2f} 円）")
+                return
+
+            if reserved_budget < min_cost or reserved_budget <= 0:
+                msg = f"ℹ️ 予約額が最小注文コストより小さいため注文をスキップします（予約額: {reserved_budget:.2f} 円, 最小コスト: {min_cost:.2f} 円）"
+                print(msg)
+                # 重要なスキップは通知する（環境変数が設定されていれば）
+                try:
+                    if smtp_host and email_to:
+                        send_notification(smtp_host, smtp_port, smtp_user, smtp_password, email_to, subject, msg)
+                except Exception:
+                    pass
+                return
+
+            # ここで予算を差し引いて予約する（失敗した場合は例外が上がる）
+            if hasattr(fund_manager, 'place_order'):
+                try:
+                    ok = fund_manager.place_order(reserved_budget)
+                    if not ok:
+                        print(f"⚠️ 資金予約に失敗しました（place_order が False を返しました）。予約額: {reserved_budget:.2f}")
+                        return
+                    reserved = True
+                except Exception as e:
+                    print(f"⚠️ 予約（予算差し引き）に失敗しました: {e}")
+                    return
+
+        # 実際の注文を発行: 注文直前に最新価格を取得して数量を再計算します
+        try:
+            # 最新価格を再取得
+            ticker_now = exchange.fetch_ticker(pair) if exchange else {'last': DRY_RUN_PRICE}
+            latest_price_now = ticker_now.get('last') if isinstance(ticker_now, dict) else None
+            if latest_price_now is None:
+                print("⚠️ 注文直前に価格が取得できませんでした。予約を取り消します。")
+                # 返金
+                if reserved:
+                    with FileLock(LOCKFILE, timeout=LOCK_TIMEOUT):
+                        if hasattr(fund_manager, 'add_funds'):
+                            fund_manager.add_funds(reserved_budget)
+                return
+
+            # 予算に基づき再計算した注文数量
+            buy_amount_raw2 = reserved_budget / latest_price_now
+            buy_amount2 = math.floor(buy_amount_raw2 * (10**decimals)) / (10**decimals)
+            order_cost2 = buy_amount2 * latest_price_now
+
+            # 最小数量チェック
+            if buy_amount2 < MIN_ORDER_BTC:
+                print(f"ℹ️ 注文直前で数量が最小取引単位を下回りました: {buy_amount2} BTC (最小: {MIN_ORDER_BTC} BTC)。予約を取り消します。")
+                if reserved:
+                    with FileLock(LOCKFILE, timeout=LOCK_TIMEOUT):
+                        if hasattr(fund_manager, 'add_funds'):
+                            fund_manager.add_funds(reserved_budget)
+                return
+
+            # 最終的に execute_order を呼ぶ
+            order = execute_order(exchange, pair, 'buy', buy_amount2)
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            print(f"❌ 注文直前処理で例外が発生しました: {e}")
+            # 例外時は予約を取り消して返金
+            if reserved:
+                try:
+                    with FileLock(LOCKFILE, timeout=LOCK_TIMEOUT):
+                        if hasattr(fund_manager, 'add_funds'):
+                            fund_manager.add_funds(reserved_budget)
+                            reserved = False
+                except Exception as e2:
+                    print(f"⚠️ 予約取り消しに失敗しました: {e2}")
+            return
+
+        if order and isinstance(order, dict) and 'id' in order:
+            try:
+                print(f"💰 注文後の残高: {fund_manager.available_fund():.2f} 円")
+            except Exception:
+                print("💰 注文後の残高を取得できませんでした。")
+            print("✅ 注文が正常に完了しました。")
+        else:
+            # 注文が返ってこない/失敗した場合は予約取り消し（返金）
+            msg_fail = "⚠️ 注文は実行されませんでした（API応答が不正です）。予約を取り消します。"
+            print(msg_fail)
+            try:
+                if smtp_host and email_to:
+                    send_notification(smtp_host, smtp_port, smtp_user, smtp_password, email_to, subject, msg_fail)
+            except Exception:
+                pass
+            if reserved:
+                try:
+                    with FileLock(LOCKFILE, timeout=LOCK_TIMEOUT):
+                        if hasattr(fund_manager, 'add_funds'):
+                            fund_manager.add_funds(reserved_budget)
+                            reserved = False
+                except Exception as e:
+                    print(f"⚠️ 予約取り消し（返金）に失敗しました: {e}")
+
+    except Exception as e:
+        # 途中例外発生時は予約取り消しを試みる
+        if reserved:
+            try:
+                with FileLock(LOCKFILE, timeout=LOCK_TIMEOUT):
+                    if hasattr(fund_manager, 'add_funds'):
+                        fund_manager.add_funds(order_cost)
+                        reserved = False
+            except Exception as e2:
+                print(f"⚠️ 予約取り消しに失敗しました: {e2}")
+        print(f"⚠️ 注文に失敗しました: {e}")
+
+    # 次回の参考として残高表示
+    try:
+        required_cost = buy_amount * latest_price
+        if hasattr(fund_manager, "available_fund"):
+            available = fund_manager.available_fund()
+            if available is not None and available < required_cost:
+                print(f"🚫 次回は残高不足の可能性があります（必要: {required_cost:.2f} 円, 残高: {available:.2f} 円）")
+            else:
+                print(f"✅ 次の注文を実行可能: （必要: {required_cost:.2f} 円, 残高: {available:.2f} 円）")
+    except Exception as e:
+        print(f"🚫  残高チェック中にエラーが発生しました: {e}")
+
+    return
+
+
+# Botを実行
+if __name__ == "__main__":
+    print("🔁 自動売買Botを継続運用モードで起動します")
+    exchange = connect_to_bitbank()
+    # 初期資金は env で設定可能（なければ 20000 円）
+    initial_fund = float(os.getenv('INITIAL_FUND', '20000'))
+    fund_manager = FundManager(initial_fund=initial_fund)
+    # 毎ループで自動投入する少額（例: 毎時間100円ずつ入金する）を環境変数で指定
+    deposit_amount = float(os.getenv('DEPOSIT_AMOUNT', '0'))
+    # 自動トップアップの閾値（この金額を下回ったら自動入金を行う）
+    # 例: MIN_BALANCE_THRESHOLD=5000
+    min_balance_threshold = float(os.getenv('MIN_BALANCE_THRESHOLD', os.getenv('BALANCE_TOPUP_THRESHOLD', '5000')))
+    if not exchange:
+        print("API接続に失敗したためBotを終了します。")
+    else:
+        while True:
+            # 事前トップアップ（安全な段階的入金）: 残高が閾値未満なら段階的に入金
+            try:
+                if deposit_amount and deposit_amount > 0:
+                    try:
+                        current = float(fund_manager.available_fund())
+                    except Exception:
+                        current = None
+
+                    # 目標残高: 環境変数 TOPUP_TARGET があればそれを使い、無ければ閾値の2倍を目標にする
+                    try:
+                        topup_target = float(os.getenv('TOPUP_TARGET', str(min_balance_threshold * 2)))
+                    except Exception:
+                        topup_target = min_balance_threshold * 2
+
+                    if current is None:
+                        # available_fund が使えない場合は通常の自動入金を行う
+                        fund_manager.add_funds(deposit_amount)
+                        print(f"💳 自動入金(保険): {deposit_amount:.2f} 円 → 残高: {fund_manager.available_fund():.2f} 円")
+                    else:
+                        if current < min_balance_threshold:
+                            # 実際に入金する額は、目標との差分と deposit_amount の小さい方
+                            to_add = min(deposit_amount, max(0.0, topup_target - current))
+                            if to_add > 0:
+                                fund_manager.add_funds(to_add)
+                                print(f"💳 閾値以下のため自動入金: {to_add:.2f} 円 → 残高: {fund_manager.available_fund():.2f} 円 (閾値: {min_balance_threshold:.2f}, 目標: {topup_target:.2f})")
+                            else:
+                                print(f"ℹ️ 自動入金は不要（目標残高に達しています）: 現在 {current:.2f} 円, 目標 {topup_target:.2f} 円")
+
+            except Exception as e:
+                print(f"⚠️ 自動入金処理中にエラーが発生しました: {e}")
+
+            run_bot(exchange, fund_manager)
+
+            # 従来の毎ループ入金（あえて残す。ENVで無効化可）
+            try:
+                post_deposit = float(os.getenv('POST_LOOP_DEPOSIT', '0'))
+            except Exception:
+                post_deposit = 0
+            if post_deposit and post_deposit > 0:
+                try:
+                    fund_manager.add_funds(post_deposit)
+                    print(f"💳 ループ終了後の自動入金: {post_deposit:.2f} 円 → 残高: {fund_manager.available_fund():.2f} 円")
+                except Exception as e:
+                    print(f"⚠️ ループ後自動入金に失敗しました: {e}")
+
+            time.sleep(3600)  # 1時間待機
+
+
+# === DI対応版のエントリーポイント ===
+def run_bot_di(dry_run=False, exchange_override=None):
+    """
+    Bot のメインエントリーポイント（DI対応）
+    
+    Args:
+        dry_run (bool): True の場合、実際の取引を行わずログ出力のみ
+        exchange_override: テスト用の Exchange オブジェクト（None の場合は実際の取引所に接続）
+    
+    Returns:
+        dict: 実行結果の辞書
+    """
+    # 環境変数チェック（実行時にのみ行う）
+    required_env_vars = ["SMTP_HOST", "SMTP_PORT", "SMTP_USER", "SMTP_PASS", "TO_EMAIL", "API_KEY", "SECRET_KEY"]
+    missing_vars = [var for var in required_env_vars if not os.getenv(var)]
+    if missing_vars:
+        raise ValueError(f"以下の環境変数が .env に設定されていません: {', '.join(missing_vars)}")
+    
+    # DRY_RUN フラグの確認
+    env_dry_run = os.getenv("DRY_RUN", "").lower() in ["1", "true", "yes", "on"]
+    actual_dry_run = dry_run or env_dry_run
+    
+    print(f"🚀 Bot開始 (DRY_RUN: {actual_dry_run})")
+    
+    # Exchange の準備
+    if exchange_override:
+        exchange = exchange_override
+    elif actual_dry_run:
+        exchange = ExchangeStub()
+        print("🔧 DRY_RUN モード: ExchangeStub を使用")
+    else:
+        exchange = connect_to_bitbank()
+        if not exchange:
+            return {"status": "error", "message": "取引所接続に失敗"}
+    
+    # FundManager の準備
+    initial_fund = float(os.getenv('INITIAL_FUND', '20000'))
+    fund_manager = _adapt_fund_manager_instance(FundManager(initial_fund=initial_fund))
+    
+    try:
+        run_bot(exchange, fund_manager)
+        return {"status": "success", "message": "Bot実行完了"}
+    except Exception as e:
+        return {"status": "error", "message": f"Bot実行中にエラー: {e}"}

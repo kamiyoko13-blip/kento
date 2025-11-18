@@ -1,0 +1,18 @@
+[Unit]
+Description=Notify Bot (ninibo1127)
+After=network.target
+
+[Service]
+Type=simple
+User=ninitan
+Group=ninitan
+WorkingDirectory=/home/ninitan/notify_project
+ExecStart=/home/ninitan/notify_project/venv/bin/python -u /home/ninitan/notify_project/staging/ninibo1127.py
+Restart=on-failure
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=notify_bot
+
+[Install]
+WantedBy=multi-user.target

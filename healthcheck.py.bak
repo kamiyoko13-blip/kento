@@ -1,0 +1,102 @@
+#!/usr/bin/env python3
+"""Simple healthcheck for `ninibo.service`.
+
+Checks systemd service status and sends an email alert if the service is not active.
+Reads SMTP and EMAIL_TO settings from the project's .env file in the same directory.
+"""
+import os
+import sys
+import subprocess
+import smtplib
+from email.message import EmailMessage
+
+
+def load_env(path):
+    env = {}
+    try:
+        with open(path, 'r', encoding='utf-8') as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith('#'):
+                    continue
+                if '=' in line:
+                    k, v = line.split('=', 1)
+                    env[k.strip()] = v.strip()
+    except FileNotFoundError:
+        return {}
+    return env
+
+
+def is_service_active(name):
+    try:
+        out = subprocess.check_output(['systemctl', 'is-active', name], text=True).strip()
+        return out == 'active', out
+    except subprocess.CalledProcessError as e:
+        return False, getattr(e, 'output', '').strip() or 'unknown'
+
+
+def send_alert(smtp_host, smtp_port, use_ssl, smtp_user, smtp_password, sender, recipient, subject, body):
+    msg = EmailMessage()
+    msg['From'] = sender
+    msg['To'] = recipient
+    msg['Subject'] = subject
+    msg.set_content(body)
+
+    if use_ssl:
+        srv = smtplib.SMTP_SSL(smtp_host, smtp_port, timeout=10)
+    else:
+        srv = smtplib.SMTP(smtp_host, smtp_port, timeout=10)
+        srv.starttls()
+    try:
+        if smtp_user and smtp_password:
+            srv.login(smtp_user, smtp_password)
+        srv.send_message(msg)
+    finally:
+        try:
+            srv.quit()
+        except Exception:
+            pass
+
+
+def main():
+    base = os.path.dirname(os.path.abspath(__file__))
+    env = load_env(os.path.join(base, '.env'))
+
+    service = env.get('SERVICE_NAME', 'ninibo.service')
+
+    active, status = is_service_active(service)
+    try:
+        now = subprocess.check_output(['date', '+%F %T %z'], text=True).strip()
+    except Exception:
+        now = 'unknown-time'
+
+    if active:
+        print(f"{now} - OK: {service} is active")
+        return 0
+
+    smtp_host = env.get('SMTP_HOST', 'localhost')
+    smtp_port = int(env.get('SMTP_PORT', '465'))
+    smtp_use_ssl = env.get('SMTP_USE_SSL', '1').strip() not in ('0', 'false', 'False')
+    smtp_user = env.get('SMTP_USER')
+    smtp_password = env.get('SMTP_PASSWORD')
+    sender = env.get('SMTP_FROM', smtp_user or f'alert@{os.uname().nodename}')
+    recipient = env.get('EMAIL_TO')
+
+    if not recipient:
+        print('EMAIL_TO not set in .env; cannot send alert')
+        return 2
+
+    subj = f'ALERT: {service} is not active on {os.uname().nodename}'
+    body = f"Time: {now}\nService: {service}\nStatus: {status}\n\nThis is an automated alert from healthcheck.py"
+
+    try:
+        send_alert(smtp_host, smtp_port, smtp_use_ssl, smtp_user, smtp_password, sender, recipient, subj, body)
+        print(f"{now} - ALERT sent to {recipient}")
+        return 0
+    except Exception as e:
+        print(f"{now} - Failed to send alert: {e}")
+        return 3
+
+
+if __name__ == '__main__':
+    sys.exit(main())
