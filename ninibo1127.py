@@ -1,136 +1,109 @@
-# --- run_bot関数の最低限定義（未定義エラー対策） ---
-def run_bot(exchange, fund_manager, dry_run=False):
-    import time
-    import pandas as pd
-    PAIR = 'BTC/JPY'
-    INTERVAL = '1h'
-    LOOP_INTERVAL = 3600  # 1時間ごと
-    MIN_ORDER_BTC = float(os.getenv('MIN_ORDER_BTC', '0.0001'))
-    MAX_RISK_PERCENT = float(os.getenv('MAX_RISK_PERCENT', '0.05'))
-    BALANCE_BUFFER = float(os.getenv('BALANCE_BUFFER', '1000'))
-    RSI_BUY = float(os.getenv('RSI_BUY', '30'))
-    RSI_SELL = float(os.getenv('RSI_SELL', '70'))
-    PROFIT_TAKE_PCT = float(os.getenv('PROFIT_TAKE_PCT', '10'))
-    STOP_LOSS_PCT = float(os.getenv('STOP_LOSS_PCT', '5'))
+class FundAdapter:
+    def __init__(self, fund_manager=None, initial_fund=0.0, dry_run=True):
+        self.fund = initial_fund
 
-    def fetch_ohlcv():
-        ohlcv = exchange.fetch_ohlcv(PAIR, INTERVAL, limit=200)
-        df = pd.DataFrame(ohlcv, columns=['timestamp','open','high','low','close','volume'])
-        df['close'] = df['close'].astype(float)
-        return df
+    def add_funds(self, amount):
+        # 指定額をfundに加算
+        self.fund += amount
+        return True
 
-    def calc_rsi(df, period=14):
-        delta = df['close'].diff()
-        gain = delta.where(delta > 0, 0)
-        loss = -delta.where(delta < 0, 0)
-        avg_gain = gain.rolling(window=period).mean()
-        avg_loss = loss.rolling(window=period).mean()
-        rs = avg_gain / avg_loss
-        return 100 - (100 / (1 + rs))
+# --- 注文実行ユーティティ ---
+def execute_order(exchange, pair, order_type, amount, price=None):
 
-    def calc_macd(df, fast=12, slow=26, signal=9):
-        ema_fast = df['close'].ewm(span=fast, adjust=False).mean()
-        ema_slow = df['close'].ewm(span=slow, adjust=False).mean()
-        macd = ema_fast - ema_slow
-        macd_signal = macd.ewm(span=signal, adjust=False).mean()
-        return macd, macd_signal
+    # Place order on Bitbank (ccxt)
+    try:
+        order = None
 
-    def get_balance():
-        bal = exchange.fetch_balance()
-        jpy = bal['JPY']['free'] if 'JPY' in bal and 'free' in bal['JPY'] else 0.0
-        btc = bal['BTC']['free'] if 'BTC' in bal and 'free' in bal['BTC'] else 0.0
-        return float(jpy), float(btc)
+        # 本番注文のみ実行
 
-    def place_order(side, amount):
-        if dry_run:
-            print(f"DRY_RUN: {side} {amount:.4f} BTC")
-            return None
-        if side == 'buy':
-            order = exchange.create_order(PAIR, 'market', 'buy', amount)
+        if order_type == 'buy':
+            if price:
+                order = exchange.create_order(pair, 'limit', 'buy', amount, price)
+            else:
+                order = exchange.create_order(pair, 'market', 'buy', amount)
+            print(f"💰 買い注文: {amount:.4f} {pair.split('/')[0]} @ {price if price else '（成行）'}")
+
+        elif order_type == 'sell':
+            if price:
+                order = exchange.create_order(pair, 'limit', 'sell', amount, price)
+            else:
+                order = exchange.create_order(pair, 'market', 'sell', amount)
+            print(f"💸 売り注文: {amount:.4f} {pair.split('/')[0]} @ {price if price else '（成行）'}")
+
         else:
-            order = exchange.create_order(PAIR, 'market', 'sell', amount)
-        print(f"注文: {side} {amount:.4f} BTC")
-        return order
+            print(f"無効な注文タイプです: {order_type}")
+            
+            # return None  # ← 関数外のため削除
+
+        if order and isinstance(order, dict) and 'id' in order:
+            print(f"注文成功: {order.get('id')}")
+            return order
+        else:
+            print(f"注文に失敗しました: {order}")
+            # return None  # ← 関数外のため削除
+
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        print(f"❌ 注文実行中にエラーが発生しました: {e}")
+        # return None  # ← 関数外のため削除
+# --- DI対応版のエントリーポイント ---
+import os
+def run_bot_di(dry_run=False, exchange_override=None):
+    """
+    Bot のメインエントリーポイント（DI対応）
+    Args:
+        dry_run (bool): True の場合、実際の取引を行わずログ出力のみ
+        exchange_override: テスト用の Exchange オブジェクト（None の場合は実際の取引所に接続）
+    Returns:
+        dict: 実行結果の辞書
+    """
+    required_env_vars = ["SMTP_HOST", "SMTP_PORT", "SMTP_USER", "SMTP_PASS", "TO_EMAIL", "API_KEY", "SECRET_KEY"]
+    missing_vars = [var for var in required_env_vars if not os.getenv(var)]
+    if missing_vars:
+        raise ValueError(f"以下の環境変数が .env に設定されていません: {', '.join(missing_vars)}")
+
+    print(f"🚀 Bot開始 (本番モード)")
+
+    # Exchange の準備
+    if exchange_override:
+        exchange = exchange_override
+    else:
+        exchange = connect_to_bitbank()
+        if not exchange:
+            return {"status": "error", "message": "取引所接続に失敗"}
+
+    # FundManager の準備
+    initial_fund = float(os.getenv('INITIAL_FUND', '20000'))
+    from pathlib import Path
+    _raw_fm = FundManager(initial_fund=initial_fund, state_file=os.getenv('FUND_STATE_FILE', 'funds_state.json'))
+    import time
+    try:
+        while True:
+            result = run_bot(exchange, _raw_fm, dry_run)
+            print("1時間待機します...")
+            time.sleep(3600)  # 1時間ごとに判定
+        # returnはループ外（通常到達しない）
+        # return {"status": "success", "message": "Bot実行完了", "result": result}
+    except Exception as e:
+        return {"status": "error", "message": f"Bot実行中にエラー: {e}"}
+    # return None  # ← 関数外のため削除
+# --- 価格取得のユーティリティ ---
+def get_latest_price(exchange, pair='BTC/JPY'):
+    try:
+        ticker = exchange.fetch_ticker(pair)
+        if isinstance(ticker, dict) and 'last' in ticker:
+            return float(ticker['last'])
+        if isinstance(ticker, dict) and 'close' in ticker:
+            return float(ticker['close'])
+        # 他の型やエラー時
+        # return None  # ← 関数外のため削除
+    except Exception as e:
+        print(f"⚠️ 価格チェックエラー: {e}")
+        # return None  # ← 関数外のため削除
 
 
-    # ポジション管理リスト（複数購入・分割売却対応）
 
-    # --- 初期ポジション（手動設定例） ---
-    # ここを編集すれば、過去の購入分をBOT起動時に管理対象にできる
-    positions = [
-        {'price': 13090000, 'amount': 0.0008, 'timestamp': None},
-        {'price': 14410000, 'amount': 0.0001, 'timestamp': None},
-        {'price': 14229000, 'amount': 0.0004, 'timestamp': None},
-    ]  # [{'price':購入価格, 'amount':数量, 'timestamp':時刻}]
-
-    while True:
-        df = fetch_ohlcv()
-        df['rsi'] = calc_rsi(df)
-        macd, macd_signal = calc_macd(df)
-        df['macd'] = macd
-        df['macd_signal'] = macd_signal
-        df['short_mavg'] = df['close'].rolling(window=25).mean()
-        df['mid_mavg'] = df['close'].rolling(window=75).mean()
-        df['long_mavg'] = df['close'].rolling(window=200).mean()
-        latest = df.iloc[-1]
-        jpy, btc = get_balance()
-        current_price = latest['close']
-
-        # 利確・損切り判定（各ポジションごと）
-        sell_indices = []
-        for idx, pos in enumerate(positions):
-            profit_pct = (current_price - pos['price']) / pos['price'] * 100
-            if profit_pct >= PROFIT_TAKE_PCT:
-                print(f"利確シグナル: {profit_pct:.2f}%上昇→売却 {pos['amount']:.6f}BTC @ {pos['price']:.0f}")
-                place_order('sell', pos['amount'])
-                sell_indices.append(idx)
-            elif profit_pct <= -STOP_LOSS_PCT:
-                print(f"損切りシグナル: {profit_pct:.2f}%下落→売却 {pos['amount']:.6f}BTC @ {pos['price']:.0f}")
-                place_order('sell', pos['amount'])
-                sell_indices.append(idx)
-
-        # 売りシグナル（RSI, MACD, MAクロス）
-        if btc > MIN_ORDER_BTC:
-            sell_signal = False
-            if latest['rsi'] >= RSI_SELL:
-                print(f"RSI売りシグナル: RSI={latest['rsi']:.2f}")
-                sell_signal = True
-            if latest['macd'] < latest['macd_signal']:
-                print(f"MACDデッドクロス→売り")
-                sell_signal = True
-            if latest['short_mavg'] < latest['mid_mavg']:
-                print(f"MAクロス（短期<中期）→売り")
-                sell_signal = True
-            if sell_signal and positions:
-                for idx, pos in enumerate(positions):
-                    print(f"シグナル売却: {pos['amount']:.6f}BTC @ {pos['price']:.0f}")
-                    place_order('sell', pos['amount'])
-                    sell_indices.append(idx)
-
-        # 売却済みポジションをリストから削除
-        positions = [pos for idx, pos in enumerate(positions) if idx not in sell_indices]
-
-        # 買いシグナル（RSI, MACD, MAクロス）
-        if jpy > BALANCE_BUFFER:
-            buy_amount = min((jpy - BALANCE_BUFFER) * MAX_RISK_PERCENT / latest['close'], btc if btc else 1.0)
-            if buy_amount < MIN_ORDER_BTC:
-                buy_amount = MIN_ORDER_BTC
-            buy_signal = False
-            if latest['rsi'] <= RSI_BUY:
-                print(f"RSI買いシグナル: RSI={latest['rsi']:.2f}")
-                buy_signal = True
-            if latest['macd'] > latest['macd_signal']:
-                print(f"MACDゴールデンクロス→買い")
-                buy_signal = True
-            if latest['short_mavg'] > latest['mid_mavg']:
-                print(f"MAクロス（短期>中期）→買い")
-                buy_signal = True
-            if buy_signal:
-                place_order('buy', buy_amount)
-                positions.append({'price': current_price, 'amount': buy_amount, 'timestamp': time.time()})
-
-        print(f"待機中... JPY={jpy:.0f}, BTC={btc:.6f}, RSI={latest['rsi']:.2f}, MACD={latest['macd']:.2f}, MACDsig={latest['macd_signal']:.2f}, ポジション数={len(positions)}")
-        time.sleep(LOOP_INTERVAL)
 # --- メール通知関数の定義（未定義エラー対策） ---
 import smtplib
 from email.mime.text import MIMEText
@@ -240,6 +213,63 @@ try:
 except Exception:
     FundManager = _InternalFundManager
 
+class FundAdapter:
+    def __init__(self, fund_manager=None, initial_fund: float = 0.0, dry_run: bool = False):
+        import threading
+        self._fund = fund_manager
+        self._dry_run = bool(dry_run)
+        self._local_total = float(initial_fund or 0.0)
+        self._local_used = 0.0
+        self._lock = threading.Lock()
+
+    def available_fund(self) -> float:
+        if self._fund is not None and not self._dry_run and hasattr(self._fund, 'available_fund'):
+            try:
+                return float(self._fund.available_fund())
+            except Exception:
+                pass
+        with self._lock:
+            return float(self._local_total) - float(self._local_used)
+
+    def reserve(self, cost: float) -> bool:
+        try:
+            c = float(cost)
+        except Exception:
+            return False
+        with self._lock:
+            if self.available_fund() < c:
+                return False
+            self._local_used += c
+            return True
+
+    def place_order(self, cost: float) -> bool:
+        return self.reserve(cost)
+
+    def add_funds(self, amount: float) -> None:
+        try:
+            a = float(amount)
+        except Exception:
+            return
+        with self._lock:
+            self._local_total += a
+
+    def confirm(self, cost: float) -> None:
+        try:
+            c = float(cost)
+        except Exception:
+            return
+        with self._lock:
+            self._local_used = max(0.0, self._local_used - c)
+
+    def release(self, cost: float) -> None:
+        try:
+            c = float(cost)
+        except Exception:
+            return
+        with self._lock:
+            self._local_used = max(0.0, self._local_used - c)
+            self._local_total += c
+
 def _adapt_fund_manager_instance(fm):
     try:
         dry_run_env = str(os.getenv('DRY_RUN', '')).lower() in ('1', 'true', 'yes', 'on')
@@ -247,56 +277,6 @@ def _adapt_fund_manager_instance(fm):
         dry_run_env = False
     if fm is not None and all(hasattr(fm, name) for name in ('reserve', 'confirm', 'release', 'available_fund')):
         return fm
-    class FundAdapter:
-        def __init__(self, fund_manager=None, initial_fund: float = 0.0, dry_run: bool = False):
-            import threading
-            self._fund = fund_manager
-            self._dry_run = bool(dry_run)
-            self._local_total = float(initial_fund or 0.0)
-            self._local_used = 0.0
-            self._lock = threading.Lock()
-        def available_fund(self) -> float:
-            if self._fund is not None and not self._dry_run and hasattr(self._fund, 'available_fund'):
-                try:
-                    return float(self._fund.available_fund())
-                except Exception:
-                    pass
-            with self._lock:
-                return float(self._local_total) - float(self._local_used)
-        def reserve(self, cost: float) -> bool:
-            try:
-                c = float(cost)
-            except Exception:
-                return False
-            with self._lock:
-                if self.available_fund() < c:
-                    return False
-                self._local_used += c
-                return True
-        def place_order(self, cost: float) -> bool:
-            return self.reserve(cost)
-        def add_funds(self, amount: float) -> None:
-            try:
-                a = float(amount)
-            except Exception:
-                return
-            with self._lock:
-                self._local_total += a
-        def confirm(self, cost: float) -> None:
-            try:
-                c = float(cost)
-            except Exception:
-                return
-            with self._lock:
-                self._local_used = max(0.0, self._local_used - c)
-        def release(self, cost: float) -> None:
-            try:
-                c = float(cost)
-            except Exception:
-                return
-            with self._lock:
-                self._local_used = max(0.0, self._local_used - c)
-                self._local_total += c
     return FundAdapter(fund_manager=fm, initial_fund=fm.fund if fm and hasattr(fm, 'fund') else 0.0)
 import logging
 
@@ -356,6 +336,12 @@ try:
     load_dotenv()
 except ImportError:
     pass
+
+# Add FileLock import for file locking
+try:
+    from filelock import FileLock
+except ImportError:
+    FileLock = None  # Fallback if filelock is not installed
 env_paths = ['.env']
 DYN_OHLCV_DAYS = 30
 DYN_THRESHOLD_BUFFER_JPY = 1000
@@ -364,7 +350,7 @@ env_loaded = False
 DYN_THRESHOLD_RATIO = 1.0
 pair = 'BTC/JPY'
 days = 30
-buffer_jpy = int(os.getenv('BALANCE_BUFFER', 500))
+buffer_jpy = int(os.getenv('BALANCE_BUFFER', 1000))
 buffer_pct = 0.01
 # --- 未定義定数・変数のダミー定義 ---
 TRADE_TRIGGER_PCT = 10.0
@@ -378,6 +364,7 @@ BREAKOUT_PCT = 0.03
 BREAKOUT_SMA_SHORT = 5
 BREAKOUT_SMA_LONG = 25
 initial_cost = 0
+MAX_SLIPPAGE_PCT = 5.0  # スリッページ許容率（例: 5%）
 
 # --- STATE_FILEのグローバル定義 ---
 from pathlib import Path
@@ -386,8 +373,33 @@ STATE_FILE = Path('funds_state.json')
 class FundAdapter:
     def __init__(self, fund_manager=None, initial_fund=0.0, dry_run=True):
         self.fund = initial_fund
+
     def available_fund(self):
         return self.fund
+
+    def reserve(self, amount):
+        if amount > self.fund:
+            return False
+        self.fund -= amount
+        return True
+
+    def place_order(self, amount):
+        return self.reserve(amount)
+
+    def add_funds(self, amount):
+        self.fund += amount
+        return True
+
+    def reserve(self, amount):
+        # ダミー: 指定額をfundから減算
+        if amount > self.fund:
+            return False
+        self.fund -= amount
+        return True
+
+    def place_order(self, amount):
+        # reserveと同じ動作
+        return self.reserve(amount)
 
 import logging
 
@@ -418,15 +430,13 @@ def connect_to_bitbank():
         # ...existing code...
 
 
+
 # --- メイン実行部 ---
+# run_bot_diの定義より後ろで呼び出すように修正
 if __name__ == "__main__":
     try:
         log_info("Bot起動中...")
-        # Botのメイン処理を呼び出し（自動売買ロジック有効化）
-        # run_bot_di() の呼び出し前に関数定義が必要
-        def run_bot_di_dummy():
-            print("run_bot_di() is called (dummy implementation)")
-        run_bot_di_dummy()
+        run_bot_di()
     except Exception as e:
         log_error(f"Bot起動時に例外: {e}")
 
@@ -438,28 +448,11 @@ try:
 except Exception:
     # 最低限のインターフェースを持つスタブ実装
     class AuthenticationError(Exception):
-            pass
-
-
-    class BitbankStub:
-        def __init__(self, config=None):
-            self.apiKey = (config or {}).get('apiKey')
-            self.secret = (config or {}).get('secret')
-        # BitbankStub: テスト/フォールバック用の最小限インターフェース実装
-
-
-
-
-
- 
-try:
-    import pandas as pd  # type: ignore
-except Exception:
-    # Minimal pandas-like stub to avoid import errors and provide the small API used in this script.
-    # NOTE: This is a lightweight compatibility shim for parsing/testing and does NOT replace real pandas.
-    # BotのDIエントリーポイントで起動
-    run_bot_di()
-
+            try:
+                log_info("Bot起動中...")
+                run_bot_di()
+            except Exception as e:
+                log_error(f"Bot起動時に例外: {e}")
 # 日本標準時 (JST) のタイムゾーンオブジェクトを作成
 try:
     pass  # ← ここに必要な処理があれば記述
@@ -490,31 +483,13 @@ class ExchangeStub:
         return {'last': self._price}
 
     def fetch_ohlcv(self, pair, timeframe='1h', limit=250):
-        return []
-
-    def create_order(self, pair, type_, side, amount, price=None):
-        cost = None
         try:
-            p = float(price) if price is not None else float(self._price)
-            cost = float(amount) * p
-        except Exception:
-            cost = None
-        return {'id': 'dry_order', 'pair': pair, 'type': type_, 'side': side, 'amount': amount, 'price': price, 'cost': cost}
-
-
-def test_fund_adapter():
-    try:
-        log_info("--- FundAdapter smoke test ---")
-    except Exception:
-        log_info("--- FundAdapter smoke test ---")
-    # live-like stub
-    fm = FundManager(initial_fund=2000, state_file=os.getenv('FUND_STATE_FILE', 'funds_state.json'))
-    adapter = _adapt_fund_manager_instance(fm)
-    try:
-        log_info("initial available (live stub):", adapter.available_fund())
-    except Exception:
-        log_info("initial available (live stub):", adapter.available_fund())
+            log_info("Bot起動中...")
+            run_bot_di()
+        except Exception as e:
+            log_error(f"Bot起動時に例外: {e}")
     cost = 500
+    adapter = FundAdapter(fund_manager=None, initial_fund=1000.0, dry_run=True)
     ok = adapter.reserve(cost) if hasattr(adapter, 'reserve') else adapter.place_order(cost)
     try:
         log_info(f"reserve/place_order({cost}) -> {ok}")
@@ -550,91 +525,16 @@ def test_fund_adapter():
         try:
             log_info("✅ bitbankにccxtで認証接続しました。")
         except Exception:
-                pass
-        return exchange
+            pass
 
     except Exception as e:
         try:
             log_error(f"❌ bitbankへの接続中にエラーが発生しました: {e}")
         except Exception:
             log_error(f"❌ bitbankへの接続中にエラーが発生しました: {e}")
-        return None
-
-# === 2. 価格データの取得 ===
-def get_ohlcv(exchange, pair='BTC/JPY', timeframe='1h', limit=250):
-    """
-    """
-    try:
-        ohlcv_data = exchange.fetch_ohlcv(pair, timeframe, limit=limit)
-
-        if ohlcv_data:
-            # データをDataFrameに変換
-            df = pd.DataFrame(ohlcv_data, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-            df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
-            df = df.set_index('timestamp')
-            return df
-        else:
-            try:
-                log_warn(f"{pair} のOHLCVデータを取得できませんでした。")
-            except Exception:
-                print(f"{pair} のOHLCVデータを取得できませんでした。")
-            return None
-
-    except Exception as e:
-        print(f"OHLCVデータの取得中にエラーが発生しました: {e}")
-        return None
+        # return None  # ← 関数外のため削除
 
 
-def get_latest_price(exchange, pair='BTC/JPY', retries=3, backoff=1.0):
-    try:
-        if str(os.getenv('DRY_RUN', '0')).lower() in ('1', 'true', 'yes', 'on'):
-            try:
-                return float(os.getenv('DRY_RUN_PRICE', str(DRY_RUN_PRICE)))
-            except Exception:
-                return float(DRY_RUN_PRICE)
-    except Exception:
-                # 例外時は何もしない
-                pass
-
-    attempt = 0
-    while attempt < retries:
-        try:
-            if exchange is None:
-                # ネット接続無しのテスト環境等では DRY_RUN_PRICE を返す
-                try:
-                    return float(os.getenv('DRY_RUN_PRICE', str(DRY_RUN_PRICE)))
-                except Exception:
-                    return float(DRY_RUN_PRICE)
-
-            ticker = exchange.fetch_ticker(pair)
-            if isinstance(ticker, dict) and 'last' in ticker:
-                last = ticker.get('last')
-                if last is not None:
-                    try:
-                        return float(last)
-                    except Exception:
-                        return None
-                else:
-                    return None
-            # ccxt の一部実装はオブジェクトや異なる形で返す可能性がある
-            # 呼び出し側で安全に扱える形で None を返す
-            return None
-
-        except Exception as e:
-            attempt += 1
-            try:
-                log_warn(f"⚠️ 価格取得失敗（試行 {attempt}/{retries}）: {e}")
-            except Exception:
-                log_warn(f"⚠️ 価格取得失敗（試行 {attempt}/{retries}）: {e}")
-            if attempt >= retries:
-                break
-            sleep_sec = backoff * (2 ** (attempt - 1))
-            try:
-                time.sleep(sleep_sec)
-            except Exception:
-                    pass
-
-    return None
 
 
 # === プライベートAPI関数群（認証必須） ===
@@ -803,6 +703,32 @@ def compute_dynamic_threshold(exchange, pair='BTC/JPY', days=DYN_OHLCV_DAYS,
                               buffer_jpy=DYN_THRESHOLD_BUFFER_JPY, buffer_pct=DYN_THRESHOLD_BUFFER_PCT):
     # Compute dynamic threshold from past OHLCV data
     try:
+        import pandas as pd
+        def get_ohlcv(exchange, pair='BTC/JPY', timeframe='1d', limit=100):
+            try:
+                raw = exchange.fetch_ohlcv(pair, timeframe=timeframe, limit=limit)
+                if not raw or len(raw) == 0:
+                    return None
+                df = pd.DataFrame(raw, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+                df['datetime'] = pd.to_datetime(df['timestamp'], unit='ms')
+                return df
+            except Exception as e:
+                print(f"⚠️ OHLCV取得エラー: {e}")
+                return None
+        # Define get_ohlcv if not already defined
+        def get_ohlcv(exchange, pair='BTC/JPY', timeframe='1d', limit=100):
+            try:
+                raw = exchange.fetch_ohlcv(pair, timeframe=timeframe, limit=limit)
+                if not raw or len(raw) == 0:
+                    return None
+                import pandas as pd
+                df = pd.DataFrame(raw, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+                df['datetime'] = pd.to_datetime(df['timestamp'], unit='ms')
+                return df
+            except Exception as e:
+                print(f"⚠️ OHLCV取得エラー: {e}")
+                return None
+
         df = get_ohlcv(exchange, pair, timeframe='1d', limit=max(10, days + 5))
         if df is None or len(df) == 0:
             return None, None, None
@@ -837,6 +763,20 @@ def compute_dynamic_threshold(exchange, pair='BTC/JPY', days=DYN_OHLCV_DAYS,
             pass
         return None, None, None
 
+
+def get_ohlcv(exchange, pair='BTC/JPY', timeframe='1d', limit=100):
+    # Fetch OHLCV data and return as DataFrame
+    try:
+        import pandas as pd
+        raw = exchange.fetch_ohlcv(pair, timeframe=timeframe, limit=limit)
+        if not raw or len(raw) == 0:
+            return None
+        df = pd.DataFrame(raw, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+        df['datetime'] = pd.to_datetime(df['timestamp'], unit='ms')
+        return df
+    except Exception as e:
+        print(f"⚠️ OHLCV取得エラー: {e}")
+        return None
 
 def compute_sma_from_ohlcv(exchange, pair='BTC/JPY', days=30):
     # Calculate simple moving average (SMA) from daily OHLCV. Return None on failure.
@@ -1123,6 +1063,8 @@ def write_indicators_csv(indicators: dict, pair: str, signal: str = 'NONE', csv_
 # -----------------------------
 # ヘルパー: 手数料考慮の数量計算
 # -----------------------------
+import math
+
 def round_down_qty(qty: float, step: float) -> float:
     if step <= 0:
         return qty
@@ -1335,6 +1277,9 @@ def is_slippage_too_large(reference_price, latest_price):
 
 # === 3. 売買シグナルの判定（MA 25/75/200 + 買い増しロジック） ===
 def generate_signals(df):
+    # テスト用: DRY_RUNかつFORCE_SELL_SIGNAL環境変数が有効なら必ず売りシグナル
+    if str(os.getenv('DRY_RUN', '0')).lower() in ('1', 'true', 'yes', 'on') and str(os.getenv('FORCE_SELL_SIGNAL', '0')).lower() in ('1', 'true', 'yes', 'on'):
+        return 'sell_all', '【テスト】FORCE_SELL_SIGNALにより強制売りシグナル発生'
     # Generate buy/sell signals from price data.
     # データ数が200本必要
     if df is None or len(df) < 200:
@@ -1344,7 +1289,6 @@ def generate_signals(df):
         except Exception:
             log_warn(f"⚠️ データが不足しています。最低200本必要ですが、{len(df) if df is not None else 0}本しかありません。")
         return None
-
 
     # 短期25、中期75、長期200を追加
     df['short_mavg'] = df['close'].rolling(window=25).mean()
@@ -1412,6 +1356,8 @@ def log_order(action, pair, amount, price=None):
 
 # === 5. 注文の実行 ===
 
+
+# --- 注文実行ユーティリティ ---
 def execute_order(exchange, pair, order_type, amount, price=None):
     # Place order on Bitbank (ccxt)
     try:
@@ -1662,6 +1608,7 @@ def _ensure_fund_manager_has_funds(fm, initial_amount=None):
             # Cooldown (買いの間隔) チェック
             state = load_state()
             last_buy = get_last_buy_time(state)
+            COOLDOWN_SEC = int(os.getenv('COOLDOWN_SEC', '3600'))  # デフォルトは1時間
             if last_buy and (time.time() - last_buy) < COOLDOWN_SEC:
                 print("Cooldown active -> skipping buy to avoid frequent add-on")
                 return
@@ -1703,6 +1650,11 @@ def _ensure_fund_manager_has_funds(fm, initial_amount=None):
             except Exception:
                 approx_qty = 0.0
             try:
+                # Define fee_fixed before using it
+                try:
+                    fee_fixed = float(os.getenv('FEE_FIXED_JPY', '0.0'))
+                except Exception:
+                    fee_fixed = 0.0
                 detail = (
                     f"予約額={reserved_budget:.2f}, q_check={q_check:.8f}, cost_check={cost_check:.2f}, fee_check={fee_check:.2f}, "
                     f"fee_rate={fee_rate}, fee_fixed={fee_fixed:.2f}, min_btc={MIN_ORDER_BTC}, step={MIN_ORDER_BTC}, "
@@ -2206,14 +2158,7 @@ if __name__ == "__main__":
         log_debug(f"DEBUG: __main__ start - DRY_RUN={DRY_RUN}")
     except Exception:
         pass
-    log_debug(f"DEBUG: __main__ start - DRY_RUN={DRY_RUN}")
-    # CLI helper: run small adapter test and exit
-    try:
-        if len(sys.argv) > 1 and sys.argv[1] == 'test_adapter':
-            test_fund_adapter()
-            sys.exit(0)
-    except Exception:
-        pass
+        # ...existing code...
     exchange = connect_to_bitbank()
     # 初期資金は env で設定可能（なければ 20000 円）
     initial_fund = float(os.getenv('INITIAL_FUND', '20000'))
@@ -2263,43 +2208,33 @@ if __name__ == "__main__":
                         trigger_percent = 20.0
 
                 # === ここから自動売却ロジック ===
-                # ポジションが存在し、売りトリガーを超えたら自動売却
+                # ポジションが存在し、各ポジションごとに売りトリガーを超えたら自動売却
                 try:
                     positions = state.get('positions') if isinstance(state, dict) else None
+                    sold_positions = []
                     if positions and isinstance(positions, list) and len(positions) > 0:
-                        # 直近のポジション（買い）を取得
-                        last_pos = positions[-1]
-                        entry_price = float(last_pos.get('entry_price', 0.0))
-                        qty = float(last_pos.get('qty', 0.0))
-                        # 売りトリガー価格
                         sell_trigger_pct = float(os.getenv('TRADE_TRIGGER_PCT', '20.0'))
-                        sell_trigger_price = entry_price * (1.0 + sell_trigger_pct / 100.0)
-                        # 売り条件成立
-                        if latest_price and entry_price > 0 and float(latest_price) >= sell_trigger_price and qty > 0:
-                            print(f"🚀 売りシグナル: entry={entry_price:.0f}円, trigger={sell_trigger_price:.0f}円, 現在={latest_price:.0f}円, qty={qty}")
-                            # 売却実行
-                            order = execute_order(exchange, 'BTC/JPY', 'sell', qty)
-                            print(f"DEBUG: execute_order(sell) returned: {order}")
-                            # ポジション記録
-                            record_position(state, 'sell', float(latest_price), qty)
-                            # ポジションをクリア
-                            state['positions'] = []
-                            # 監視基準をリセット
-                            state['watch_reference'] = float(latest_price)
-                            save_state(state)
-                            # 通知
-                            try:
-                                smtp_host = os.getenv('SMTP_HOST')
-                                smtp_port = int(os.getenv('SMTP_PORT', '587'))
-                                smtp_user = os.getenv('SMTP_USER')
-                                smtp_password = os.getenv('SMTP_PASS')
-                                email_to = os.getenv('TO_EMAIL')
-                                if smtp_host and email_to:
-                                    subject = f"BTC Auto Sell Complete: {qty:.4f} BTC"
-                                    # watch_refが未定義の場合はentry_priceまたはreference_priceを使う
-                                    try:
-                                        safe_watch_ref = watch_ref
-                                    except Exception:
+                        for pos in positions[:]:
+                            entry_price = float(pos.get('price', 0.0))
+                            qty = float(pos.get('qty', 0.0))
+                            sell_trigger_price = entry_price * (1.0 + sell_trigger_pct / 100.0)
+                            if latest_price and entry_price > 0 and float(latest_price) >= sell_trigger_price and qty > 0:
+                                print(f"🚀 売りシグナル: entry={entry_price:.0f}円, trigger={sell_trigger_price:.0f}円, 現在={latest_price:.0f}円, qty={qty}")
+                                # 売却実行
+                                order = execute_order(exchange, 'BTC/JPY', 'sell', qty)
+                                print(f"DEBUG: execute_order(sell) returned: {order}")
+                                # ポジション記録
+                                record_position(state, 'sell', float(latest_price), qty)
+                                sold_positions.append(pos)
+                                # 通知
+                                try:
+                                    smtp_host = os.getenv('SMTP_HOST')
+                                    smtp_port = int(os.getenv('SMTP_PORT', '587'))
+                                    smtp_user = os.getenv('SMTP_USER')
+                                    smtp_password = os.getenv('SMTP_PASS')
+                                    email_to = os.getenv('TO_EMAIL')
+                                    if smtp_host and email_to:
+                                        subject = f"BTC Auto Sell Complete: {qty:.4f} BTC"
                                         try:
                                             safe_watch_ref = entry_price
                                         except Exception:
@@ -2307,20 +2242,26 @@ if __name__ == "__main__":
                                                 safe_watch_ref = reference_price
                                             except Exception:
                                                 safe_watch_ref = 0.0
-                                    message = (
-                                        f"BTC auto sell completed!\n\n"
-                                        f"[Sell Info]\n"
-                                        f"Amount: {qty:.4f} BTC\n"
-                                        f"Sell Price: {latest_price:,.0f} JPY/BTC\n"
-                                        f"Entry Price: {entry_price:,.0f} JPY\n"
-                                        f"Reference: {safe_watch_ref:,.0f} JPY\n"
-                                        f"Profit: approx. {(latest_price-entry_price)*qty:,.0f} JPY\n\n"
-                                        f"Position cleared.\n"
-                                    )
-                                    send_notification(smtp_host, smtp_port, smtp_user, smtp_password, email_to, subject, message)
-                                    print(f"📧 売却完了通知メール送信完了")
-                            except Exception as e:
-                                print(f"⚠️ 売却通知メール送信エラー: {e}")
+                                        message = (
+                                            f"BTC auto sell completed!\n\n"
+                                            f"[Sell Info]\n"
+                                            f"Amount: {qty:.4f} BTC\n"
+                                            f"Sell Price: {latest_price:,.0f} JPY/BTC\n"
+                                            f"Entry Price: {entry_price:,.0f} JPY\n"
+                                            f"Reference: {safe_watch_ref:,.0f} JPY\n"
+                                            f"Profit: approx. {(latest_price-entry_price)*qty:,.0f} JPY\n\n"
+                                            f"Position cleared.\n"
+                                        )
+                                        send_notification(smtp_host, smtp_port, smtp_user, smtp_password, email_to, subject, message)
+                                        print(f"📧 売却完了通知メール送信完了")
+                                except Exception as e:
+                                    print(f"⚠️ 売却通知メール送信エラー: {e}")
+                        # 売却済みポジションのみ削除
+                        for sold in sold_positions:
+                            positions.remove(sold)
+                        # 監視基準をリセット（最新価格）
+                        state['watch_reference'] = float(latest_price)
+                        save_state(state)
                 except Exception as e:
                     print(f"⚠️ 自動売却処理で例外: {e}")
                     
@@ -2521,56 +2462,44 @@ if __name__ == "__main__":
 
 
 # === DI対応版のエントリーポイント ===
-def run_bot_di(dry_run=False, exchange_override=None):
-    # Main entry point for bot (DI version)
-    # 環境変数チェック（dry_run の場合は必須チェックを緩和する）
-    # DRY_RUN 実行時は外部サービス（SMTP/APIキー等）を必須にしない
-    env_dry_run = os.getenv("DRY_RUN", "").lower() in ["1", "true", "yes", "on"]
-    actual_dry_run = dry_run or env_dry_run
-
-    if not actual_dry_run:
-        required_env_vars = ["SMTP_HOST", "SMTP_PORT", "SMTP_USER", "SMTP_PASS", "TO_EMAIL", "API_KEY", "SECRET_KEY"]
-        missing_vars = [var for var in required_env_vars if not os.getenv(var)]
-        if missing_vars:
-            raise ValueError(f"以下の環境変数が .env に設定されていません: {', '.join(missing_vars)}")
-
-    # DRY_RUN フラグの確認
-    env_dry_run = os.getenv("DRY_RUN", "").lower() in ["1", "true", "yes", "on"]
-    actual_dry_run = dry_run or env_dry_run
-    
-    print(f"🚀 Bot開始 (DRY_RUN: {actual_dry_run})")
-    
-    # Exchange の準備
-    if exchange_override:
-        exchange = exchange_override
-    elif actual_dry_run:
-        exchange = ExchangeStub()
-        print("🔧 DRY_RUN モード: ExchangeStub を使用")
-    else:
-        exchange = connect_to_bitbank()
-        if not exchange:
-            return {"status": "error", "message": "取引所接続に失敗"}
-    
-    # FundManager の準備
-    initial_fund = float(os.getenv('INITIAL_FUND', '20000'))
-    # Create raw FundManager instance, ensure it has funds when appropriate, then adapt
-    _raw_fm = FundManager(initial_fund=initial_fund, state_file=os.getenv('FUND_STATE_FILE', 'funds_state.json'))
-    _ensure_fund_manager_has_funds(_raw_fm, initial_amount=initial_fund)
-    fund_manager = None
-    
-    try:
-        # メインループをrun_botとして呼び出す
-        result = run_bot(exchange, _raw_fm, actual_dry_run)
-        return {"status": "success", "message": "Bot実行完了", "result": result}
-    except Exception as e:
-        return {"status": "error", "message": f"Bot実行中にエラー: {e}"}
-    return None
-# === メインループ本体 ===
 def run_bot(exchange, fund_manager, dry_run=False):
-    # ここにBotのメイン処理を記述（例: 1回だけ動作する簡易版）
-    print(f"run_bot() called: exchange={exchange}, fund_manager={fund_manager}, dry_run={dry_run}")
-    # 実際の自動売買ロジックをここに実装する
-    # 例: 価格取得・注文・ログ出力など
+    PAIR = 'BTC/JPY'
+    PROFIT_TAKE_PCT = 10.0  # 利確10%
+    BUY_MORE_PCT = 10.0     # 追加買い10%下落
+    MIN_ORDER_BTC = 0.001
+
+    positions = []  # ポジション管理 [{'price': 買値, 'amount': 数量, 'timestamp': ...}, ...]
+
+    # 初回買い（例: 1回だけ）
+    current_price = get_latest_price(exchange, PAIR)
+    buy_cost = current_price * MIN_ORDER_BTC
+    if fund_manager.available_fund() - buy_cost >= 1000:
+        if fund_manager.place_order(buy_cost):
+            execute_order(exchange, PAIR, 'buy', MIN_ORDER_BTC, current_price)
+            positions.append({'price': current_price, 'amount': MIN_ORDER_BTC, 'timestamp': time.time()})
+            print(f"新規買い: {current_price}円で{MIN_ORDER_BTC}BTC（残高1000円以上キープ）")
+
+    # 1回だけ利確・追加買い判定（本番はループ化推奨）
+    current_price = get_latest_price(exchange, PAIR)
+    for pos in positions[:]:
+        buy_price = pos['price']
+        amount = pos['amount']
+        # 利確判定（10%上昇）
+        if current_price >= buy_price * (1 + PROFIT_TAKE_PCT / 100):
+            print(f"利確売り: 買値={buy_price}, 現在={current_price}, amount={amount}")
+            execute_order(exchange, PAIR, 'sell', amount, current_price)
+            fund_manager.add_funds(current_price * amount)
+            positions.remove(pos)
+        # 追加買い判定（10%下落）
+        elif current_price <= buy_price * (1 - BUY_MORE_PCT / 100):
+            print(f"追加買い: 買値={buy_price}, 現在={current_price}, amount={amount}")
+            add_cost = current_price * amount
+            if fund_manager.available_fund() - add_cost >= 1000:
+                if fund_manager.place_order(add_cost):
+                    execute_order(exchange, PAIR, 'buy', amount, current_price)
+                    positions.append({'price': current_price, 'amount': amount, 'timestamp': time.time()})
+                    print(f"追加買い: {current_price}円で{amount}BTC（残高1000円以上キープ）")
+
     return "run_bot executed"
 
 
