@@ -565,6 +565,17 @@ def connect_to_bitbank():
 
 # --- メイン実行部 ---
 # run_bot_diの定義より後ろで呼び出すように修正
+import time
+
+def run_bot_di():
+    while True:
+        try:
+            log_info("Botメインループ動作中...")
+            # ここに取引・監視ロジックを追加してください
+        except Exception as e:
+            log_error(f"Botループ内で例外: {e}")
+        time.sleep(interval_seconds)
+
 if __name__ == "__main__":
     try:
         log_info("Bot起動中...")
