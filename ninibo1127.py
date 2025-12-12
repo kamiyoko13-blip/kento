@@ -53,15 +53,17 @@ def execute_order(exchange, pair, order_type, amount, price=None):
         import traceback
         traceback.print_exc()
         print(f"❌ 注文実行中にエラーが発生しました: {e}")
-        # return None  # ← 関数外のため削除
-# --- DI対応版のエントリーポイント ---
-import os
-def run_bot_di(dry_run=False, exchange_override=None):
-    """
-    Bot のメインエントリーポイント（DI対応）
-    Args:
-        dry_run (bool): True の場合、実際の取引を行わずログ出力のみ
-        exchange_override: テスト用の Exchange オブジェクト（None の場合は実際の取引所に接続）
+        # 修正: except Exception as e: の直後に式やブロックが必要
+        # 不要な except Exception as e: を削除し、正しい例外処理ブロックに修正
+        # ここでエラー処理を追加する場合は下記のように記述してください
+        # try:
+        #     log_error(f"❌ 約定履歴取得エラー: {e}")
+        # except Exception:
+        #     pass
+        # return []
+    # Args:
+    #     dry_run (bool): True の場合、実際の取引を行わずログ出力のみ
+    #     exchange_override: テスト用の Exchange オブジェクト（None の場合は実際の取引所に接続）
     pass  # 実装未定義部をパスしてインデントエラーを修正
 # --- 価格取得のユーティリティ ---
 def get_latest_price(exchange, pair='BTC/JPY'):
@@ -158,7 +160,7 @@ def _make_internal_fund_manager_class():
             try:
                 return float(self._available)
             except Exception:
-                return 0.0
+                return 0.0 
 
         def place_order(self, cost: float) -> bool:
             try:
