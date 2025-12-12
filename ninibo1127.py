@@ -574,18 +574,24 @@ def save_simple_log(message):
 
 
 def run_bot_di():
+    print("run_bot_di: start")
     try:
         exchange = connect_to_bitbank()
+        print("取引所接続OK")
     except Exception as e:
+        print(f"取引所接続エラー: {e}")
         log_error(f"取引所接続エラー: {e}")
         return
     while True:
         try:
+            print("ループ突入")
             price = get_latest_price(exchange)
+            print(f"現在価格: {price}")
             log_info(f"現在価格: {price}")
             save_simple_log(f"現在価格: {price}")
             # ここに売買判断や注文処理を追加
         except Exception as e:
+            print(f"Botループ内で例外: {e}")
             log_error(f"Botループ内で例外: {e}")
         time.sleep(interval_seconds)
 
