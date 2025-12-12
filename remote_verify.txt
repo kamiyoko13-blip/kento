@@ -1,0 +1,8 @@
+open sftp://ninitan@160.251.213.125:22 -privatekey="C:\Users\81806\.ssh\notify_deploy.ppk" -hostkey="ssh-ed25519 256 SHA256:FJ9k0ZBv6g1LMaM2GSkH1fDzZ84arFsplTTIg98G/yk"
+call python3 -m py_compile /home/ninitan/notify_project/staging/ninibo1127.py
+call echo "Syntax check result: $?"
+<<<<<<< HEAD
+exit
+=======
+exit
+>>>>>>> 74f1ab306ca4f7cbafdafeccf820148ccd40d52d

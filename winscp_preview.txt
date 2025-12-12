@@ -1,0 +1,5 @@
+open sftp://ninitan@160.251.213.125:22 -privatekey="C:\Users\81806\.ssh\notify_deploy.ppk" -hostkey="ssh-ed25519 256 SHA256:FJ9k0ZBv6g1LMaM2GSkH1fDzZ84arFsplTTIg98G/yk"
+lcd C:\Users\81806\Desktop\notify_project
+cd /home/ninitan/notify_project
+synchronize local -filemask="* | *.env;backups/;*.bak;*.pem;*.key;*.p12;*.env.*" -preview
+exit

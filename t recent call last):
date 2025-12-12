@@ -1,0 +1,12 @@
+nohup: ignoring input
+[OK] 環境変数を .env から読み込みました
+Bot起動中...
+🔁 自動売買Botを継続運用モードで起動します
+🔁 自動売買Botを継続運用モードで起動します
+DEBUG: __main__ start - DRY_RUN=False
+DEBUG: __main__ start - DRY_RUN=False
+Traceback (most recent call last):
+  File "/home/ninitan/notify_project/ninibo1127.py", line 2722, in <module>
+    run_bot(exchange, fund_manager)
+    ^^^^^^^
+NameError: name 'run_bot' is not defined

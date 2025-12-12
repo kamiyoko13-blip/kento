@@ -1,0 +1,14 @@
+{
+  "available": 8737.6544,
+  "reserved": 0.0,
+  "positions": [
+    {
+      "side": "buy",
+      "price": 14000000,
+      "qty": 0.0001,
+      "time": 1700000000
+    }
+  ],
+  "last_jpy_balance": 566.6246000000001,
+  "watch_reference": 14023935.0
+}
