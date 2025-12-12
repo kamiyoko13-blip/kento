@@ -1534,12 +1534,13 @@ def _ensure_fund_manager_has_funds(fm, initial_amount=None):
 
     # DEBUG: run_bot entry
     try:
+        DRY_RUN = os.getenv("DRY_RUN", "0").lower() in ["1", "true", "yes", "on"]
         log_debug(f"DEBUG: run_bot start - DRY_RUN={DRY_RUN}, pair={pair}")
     except Exception:
         log_debug("DEBUG: run_bot start (print failed)")
 
     # 実行時チェック: 必要な環境変数は dry_run のときは緩和する
-    env_dry_run = os.getenv("DRY_RUN", "").lower() in ["1", "true", "yes", "on"]
+    env_dry_run = str(os.getenv("DRY_RUN", "")).lower() in ["1", "true", "yes", "on"]
     if not env_dry_run:
         # 実運用時に必須の環境変数
         required_env_vars = ["SMTP_HOST", "SMTP_PORT", "SMTP_USER", "SMTP_PASS", "TO_EMAIL", "API_KEY", "SECRET_KEY"]
