@@ -566,12 +566,25 @@ def connect_to_bitbank():
 # --- メイン実行部 ---
 # run_bot_diの定義より後ろで呼び出すように修正
 import time
+from datetime import datetime
+
+def save_simple_log(message):
+    with open("simple_bot.log", "a", encoding="utf-8") as f:
+        f.write(f"{datetime.now().isoformat()} {message}\n")
+
 
 def run_bot_di():
+    try:
+        exchange = connect_to_bitbank()
+    except Exception as e:
+        log_error(f"取引所接続エラー: {e}")
+        return
     while True:
         try:
-            log_info("Botメインループ動作中...")
-            # ここに取引・監視ロジックを追加してください
+            price = get_latest_price(exchange)
+            log_info(f"現在価格: {price}")
+            save_simple_log(f"現在価格: {price}")
+            # ここに売買判断や注文処理を追加
         except Exception as e:
             log_error(f"Botループ内で例外: {e}")
         time.sleep(interval_seconds)
