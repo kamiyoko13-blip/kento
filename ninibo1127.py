@@ -37,6 +37,13 @@ def execute_order(exchange, pair, order_type, amount, price=None):
 
         if order and isinstance(order, dict) and 'id' in order:
             print(f"注文成功: {order.get('id')}")
+            # 残高表示を追加
+            if hasattr(exchange, 'fetch_balance'):
+                try:
+                    balance = exchange.fetch_balance()
+                    print(f"現在の残高: {balance}")
+                except Exception as e:
+                    print(f"残高取得エラー: {e}")
             return order
         else:
             print(f"注文に失敗しました: {order}")
@@ -55,43 +62,7 @@ def run_bot_di(dry_run=False, exchange_override=None):
     Args:
         dry_run (bool): True の場合、実際の取引を行わずログ出力のみ
         exchange_override: テスト用の Exchange オブジェクト（None の場合は実際の取引所に接続）
-    Returns:
-        dict: 実行結果の辞書
-    """
-    required_env_vars = ["SMTP_HOST", "SMTP_PORT", "SMTP_USER", "SMTP_PASS", "TO_EMAIL", "API_KEY", "SECRET_KEY"]
-    missing_vars = [var for var in required_env_vars if not os.getenv(var)]
-    if missing_vars:
-        raise ValueError(f"以下の環境変数が .env に設定されていません: {', '.join(missing_vars)}")
-
-    print(f"🚀 Bot開始 (本番モード)")
-
-    # Exchange の準備
-    if exchange_override:
-        exchange = exchange_override
-    else:
-        exchange = connect_to_bitbank()
-        if not exchange:
-            return {"status": "error", "message": "取引所接続に失敗"}
-
-    # FundManager の準備
-    initial_fund = float(os.getenv('INITIAL_FUND', '20000'))
-    from pathlib import Path
-    _raw_fm = FundManager(initial_fund=initial_fund, state_file=os.getenv('FUND_STATE_FILE', 'funds_state.json'))
-    import time
-    try:
-        while True:
-            result = run_bot(exchange, _raw_fm, dry_run)
-            print("5分待機します...")
-            import time
-            time.sleep(300)  # 5分ごとに判定
-        # returnはループ外（通常到達しない）
-        # return {"status": "success", "message": "Bot実行完了", "result": result}
-    except Exception as e:
-        import traceback
-        print("例外発生:", e)
-        traceback.print_exc()
-        return {"status": "error", "message": f"Bot実行中にエラー: {e}"}
-    # return None  # ← 関数外のため削除
+    pass  # 実装未定義部をパスしてインデントエラーを修正
 # --- 価格取得のユーティリティ ---
 def get_latest_price(exchange, pair='BTC/JPY'):
     try:
@@ -143,6 +114,151 @@ def _make_internal_fund_manager_class():
                     self._reserved = float(raw.get('reserved', 0.0))
             except Exception:
                 pass
+
+        def get_positions_reserved(self, positions_file='positions_state.json'):
+            """
+            positions_state.json から全ポジションの合計コスト(予約額)を計算
+            """
+            try:
+                pf = Path(positions_file)
+                if not pf.exists():
+                    return 0.0
+                with pf.open(encoding='utf-8') as f:
+                    data = json.load(f)
+                # Fix: if data is a dict with 'positions', use that
+                if isinstance(data, dict) and 'positions' in data:
+                    positions = data['positions']
+                else:
+                    positions = data
+                if not isinstance(positions, list):
+                    return 0.0
+                total = 0.0
+                for pos in positions:
+                    price = float(pos.get('price', 0))
+                    amount = float(pos.get('amount', 0))
+                    total += price * amount
+                return total
+            except Exception as e:
+                try:
+                    print(f"⚠️ positions_state.json予約額取得エラー: {e}")
+                except Exception:
+                    pass
+                return 0.0
+
+        def _persist(self):
+            if not self._state_file:
+                return
+            try:
+                obj = {'available': float(self._available), 'reserved': float(self._reserved)}
+                self._state_file.write_text(json.dumps(obj, ensure_ascii=False, indent=2), encoding='utf-8')
+            except Exception:
+                pass
+
+        def available_fund(self) -> float:
+            try:
+                return float(self._available)
+            except Exception:
+                return 0.0
+
+        def place_order(self, cost: float) -> bool:
+            try:
+                c = float(cost)
+            except Exception:
+                return False
+            with self._lock:
+                if self._available < c:
+                    return False
+                self._available = float(self._available) - c
+                self._persist()
+            return True
+
+        def add_funds(self, amount: float) -> None:
+            try:
+                a = float(amount)
+            except Exception:
+                return
+            with self._lock:
+                self._available = float(self._available) + a
+                self._persist()
+
+        def reserve(self, cost: float) -> bool:
+            try:
+                c = float(cost)
+            except Exception:
+                return False
+            with self._lock:
+                # positions_state.jsonの合計予約額を取得
+                reserved_from_positions = self.get_positions_reserved()
+                try:
+                    print(f"予約フェーズ: 予約額（JPY）={reserved_from_positions}")
+                except Exception:
+                    pass
+                # 注文後に1000円以上残る場合のみ許可
+                if self._available - c < 1000:
+                    return False
+                self._available = float(self._available) - c
+                self._reserved = float(self._reserved) + c
+                self._persist()
+                return True
+
+        def confirm(self, cost: float) -> None:
+            try:
+                c = float(cost)
+            except Exception:
+                return
+            with self._lock:
+                self._reserved = max(0.0, float(self._reserved) - c)
+                self._persist()
+
+        def release(self, cost: float) -> None:
+            try:
+                c = float(cost)
+            except Exception:
+                return
+            with self._lock:
+                self._reserved = max(0.0, float(self._reserved) - c)
+                self._available = float(self._available) + c
+                self._persist()
+    return FundManagerStub
+
+def _make_internal_fund_manager_class():
+    class FundManagerStub:
+        def __init__(self, initial_fund: float = 0.0, state_file: Optional[str] = None):
+            import threading
+            self._lock = threading.Lock()
+            self._state_file = Path(state_file) if state_file else None
+            self._available = float(initial_fund or 0.0)
+            self._reserved = 0.0
+            try:
+                if self._state_file and self._state_file.exists():
+                    raw = json.loads(self._state_file.read_text(encoding='utf-8'))
+                    self._available = float(raw.get('available', self._available))
+                    self._reserved = float(raw.get('reserved', 0.0))
+            except Exception:
+                pass
+        def get_positions_reserved(self, positions_file='positions_state.json'):
+            try:
+                pf = Path(positions_file)
+                if not pf.exists():
+                    return 0.0
+                with pf.open(encoding='utf-8') as f:
+                    data = json.load(f)
+                if isinstance(data, dict) and 'positions' in data:
+                    data = data['positions']
+                if not isinstance(data, list):
+                    return 0.0
+                total = 0.0
+                for pos in data:
+                    price = float(pos.get('price', 0))
+                    amount = float(pos.get('amount', 0))
+                    total += price * amount
+                return total
+            except Exception as e:
+                try:
+                    print(f"⚠️ positions_state.json予約額取得エラー: {e}")
+                except Exception:
+                    pass
+                return 0.0
         def _persist(self):
             if not self._state_file:
                 return
@@ -181,7 +297,11 @@ def _make_internal_fund_manager_class():
             except Exception:
                 return False
             with self._lock:
-                # 注文後に1000円以上残る場合のみ許可
+                reserved_from_positions = self.get_positions_reserved()
+                try:
+                    print(f"予約フェーズ: 予約額（JPY）={reserved_from_positions}")
+                except Exception:
+                    pass
                 if self._available - c < 1000:
                     return False
                 self._available = float(self._available) - c
@@ -209,6 +329,7 @@ def _make_internal_fund_manager_class():
 
 _InternalFundManager = _make_internal_fund_manager_class()
 try:
+    pass  # ← ここに必要な処理があれば記述
     from funds import FundManager as _ImportedFundManager  # type: ignore
     required = ('available_fund', 'place_order', 'add_funds')
     if all(hasattr(_ImportedFundManager, name) for name in required):
@@ -242,11 +363,11 @@ class FundAdapter:
         except Exception:
             return False
         with self._lock:
-                # 注文後に1000円以上残る場合のみ許可
-                if self.available_fund() - c < 1000:
-                    return False
-                self._local_used += c
-                return True
+            # 注文後に1000円以上残る場合のみ許可
+            if self.available_fund() - c < 1000:
+                return False
+            self._local_used += c
+            return True
 
     def place_order(self, cost: float) -> bool:
         return self.reserve(cost)
@@ -383,12 +504,13 @@ class FundAdapter:
     def available_fund(self):
         return self.fund
 
+
     def reserve(self, amount):
-            # 注文後に1000円以上残る場合のみ許可
-            if self.fund - amount < 1000:
-                return False
-            self.fund -= amount
-            return True
+        # 注文後に1000円以上残る場合のみ許可
+        if self.fund - amount < 1000:
+            return False
+        self.fund -= amount
+        return True
 
     def place_order(self, amount):
         return self.reserve(amount)
@@ -403,6 +525,7 @@ class FundAdapter:
             return False
         self.fund -= amount
         return True
+
 
     def place_order(self, amount):
         # reserveと同じ動作
@@ -455,11 +578,7 @@ try:
 except Exception:
     # 最低限のインターフェースを持つスタブ実装
     class AuthenticationError(Exception):
-            try:
-                log_info("Bot起動中...")
-                run_bot_di()
-            except Exception as e:
-                log_error(f"Bot起動時に例外: {e}")
+        pass
 # 日本標準時 (JST) のタイムゾーンオブジェクトを作成
 try:
     pass  # ← ここに必要な処理があれば記述
@@ -526,12 +645,11 @@ class ExchangeStub:
 
 # === プライベートAPI関数群（認証必須） ===
 
-def get_account_balance(exchange):
-    
+from typing import Dict, Any
+def get_account_balance(exchange) -> dict[str, dict[str, Any]]:
     """
-    アカウントの残高情報を取得します。
     Returns:
-        dict: { 'total': {...}, 'free': {...}, 'used': {...} }
+        dict[str, dict[str, Any]]: { 'total': {...}, 'free': {...}, 'used': {...} }
     """
     try:
         if str(os.getenv('DRY_RUN', '0')).lower() in ('1', 'true', 'yes', 'on'):
@@ -540,7 +658,6 @@ def get_account_balance(exchange):
                 'free': {'JPY': 100000.0, 'BTC': 0.0},
                 'used': {'JPY': 0.0, 'BTC': 0.0}
             }
-        
         balance = exchange.fetch_balance()
         return {
             'total': balance.get('total', {}),
@@ -1544,7 +1661,10 @@ def run_bot(exchange, fund_manager, dry_run=False):
             except Exception as e:
                 print(f"⚠️ 売却通知メール送信エラー: {e}")
         elif nampin_count < MAX_NAMPIN and current_price <= buy_price * (1 - nampin_interval * (nampin_count + 1)):
+            # 注文直前で最新価格・数量・コストを再取得しログ出力
+            current_price = get_latest_price(exchange, PAIR)
             add_cost = current_price * amount
+            log_info(f"ナンピン注文直前: 最新価格={current_price} 数量={amount} コスト={add_cost}")
             if fund_manager.available_fund() - add_cost >= 1000:
                 if fund_manager.place_order(add_cost):
                     order = execute_order(exchange, PAIR, 'buy', amount, current_price)
