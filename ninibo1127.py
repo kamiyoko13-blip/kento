@@ -1,3 +1,9 @@
+import os
+
+print("[DEBUG] ファイル先頭到達")
+print("mainブロック実行開始")
+print("[DEBUG] mainブロックtry直前")
+
 class FundAdapter:
     def __init__(self, fund_manager=None, initial_fund=0.0, dry_run=True):
         self.fund = initial_fund
@@ -585,41 +591,56 @@ def save_simple_log(message):
 
 
 def run_bot_di():
+    print("[DEBUG] run_bot_di最初のprint直前")
     print("run_bot_di: start")
     interval_seconds = 10  # ループ間隔（秒）
+    print("[DEBUG] run_bot_di: connect_to_bitbank()呼び出し前")
     try:
+        api_key = os.getenv("API_KEY")
+        secret_key = os.getenv("SECRET_KEY")
+        print(f"[DEBUG] API_KEY: {api_key}")
+        print(f"[DEBUG] SECRET_KEY: {secret_key}")
         exchange = connect_to_bitbank()
+        print(f"[DEBUG] connect_to_bitbank()返り値: {exchange}")
         print("取引所接続OK")
+        print("[DEBUG] 取引所接続OK直後")
     except Exception as e:
         import traceback
-        print(f"取引所接続エラー: {e} ({type(e)})")
+        print(f"[DEBUG] 取引所接続エラー: {e} ({type(e)})")
         traceback.print_exc()
         log_error(f"取引所接続エラー: {e}")
+        print("[DEBUG] run_bot_di: return直前")
         return
+    print("[DEBUG] run_bot_di: while True直前")
     while True:
         try:
-            print("ループ突入")
+            print("[DEBUG] ループ突入")
             price = get_latest_price(exchange)
             if price is None:
-                print("価格取得失敗。スキップして継続します。")
+                print("[DEBUG] 価格取得失敗。スキップして継続します。")
                 time.sleep(interval_seconds)
                 continue
-            print(f"現在価格: {price}")
+            print(f"[DEBUG] 現在価格: {price}")
             log_info(f"現在価格: {price}")
             save_simple_log(f"現在価格: {price}")
             # ここに売買判断や注文処理を追加
         except Exception as e:
-            print(f"Botループ内で例外: {e}")
+            print(f"[DEBUG] Botループ内で例外: {e}")
+            import traceback
+            traceback.print_exc()
             log_error(f"Botループ内で例外: {e}")
+        print("[DEBUG] ループ末尾: sleep前")
         time.sleep(interval_seconds)
 
 if __name__ == "__main__":
     print("mainブロック実行開始")
     try:
         log_info("Bot起動中...")
+        print("[DEBUG] mainブロックでrun_bot_di()を呼びます")
         run_bot_di()
     except Exception as e:
         import traceback
+        print("[DEBUG] main except節突入")
         print(f"Bot実行中にエラー: {e} ({type(e)})")
         traceback.print_exc()
         # 関数外のためreturn文は削除
