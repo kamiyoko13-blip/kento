@@ -1,6 +1,7 @@
 class FundAdapter:
     def __init__(self, fund_manager=None, initial_fund=0.0, dry_run=True):
         self.fund = initial_fund
+        self.dry_run = dry_run  # DRY_RUN属性を保持
 
     def add_funds(self, amount):
         # 指定額をfundに加算
@@ -13,8 +14,14 @@ def execute_order(exchange, pair, order_type, amount, price=None):
     # Place order on Bitbank (ccxt)
     try:
         order = None
-
-        # 本番注文のみ実行
+        # FundAdapter経由ならdry_run属性も参照
+        dry_run = str(os.environ.get('DRY_RUN', '0')).lower() in ('1', 'true', 'yes', 'on')
+        if hasattr(exchange, 'dry_run') and getattr(exchange, 'dry_run'):
+            dry_run = True
+        if dry_run:
+            print(f"[DRY_RUN] {order_type}注文: {amount:.4f} {pair.split('/')[0]} @ {price if price else '（成行）'} 実際のAPI呼び出しは行いません")
+            log_info(f"[DRY_RUN] {order_type}注文: {amount:.4f} {pair.split('/')[0]} @ {price if price else '（成行）'} 実際のAPI呼び出しは行いません")
+            return {'id': 'dry_run', 'order_type': order_type, 'amount': amount, 'price': price}
 
         if order_type == 'buy':
             if price:
@@ -32,8 +39,7 @@ def execute_order(exchange, pair, order_type, amount, price=None):
 
         else:
             print(f"無効な注文タイプです: {order_type}")
-            
-            # return None  # ← 関数外のため削除
+            return None
 
         if order and isinstance(order, dict) and 'id' in order:
             print(f"注文成功: {order.get('id')}")
@@ -47,24 +53,14 @@ def execute_order(exchange, pair, order_type, amount, price=None):
             return order
         else:
             print(f"注文に失敗しました: {order}")
-            # return None  # ← 関数外のため削除
+            return None
 
     except Exception as e:
         import traceback
         traceback.print_exc()
         print(f"❌ 注文実行中にエラーが発生しました: {e}")
-        # 修正: except Exception as e: の直後に式やブロックが必要
-        # 不要な except Exception as e: を削除し、正しい例外処理ブロックに修正
-        # ここでエラー処理を追加する場合は下記のように記述してください
-        # try:
-        #     log_error(f"❌ 約定履歴取得エラー: {e}")
-        # except Exception:
-        #     pass
-        # return []
-    # Args:
-    #     dry_run (bool): True の場合、実際の取引を行わずログ出力のみ
-    #     exchange_override: テスト用の Exchange オブジェクト（None の場合は実際の取引所に接続）
-    pass  # 実装未定義部をパスしてインデントエラーを修正
+        log_error(f"❌ 注文実行中にエラーが発生しました: {e}")
+        return None
 # --- 価格取得のユーティリティ ---
 def get_latest_price(exchange, pair='BTC/JPY'):
     try:
@@ -73,11 +69,11 @@ def get_latest_price(exchange, pair='BTC/JPY'):
             return float(ticker['last'])
         if isinstance(ticker, dict) and 'close' in ticker:
             return float(ticker['close'])
-        # 他の型やエラー時
-        # return None  # ← 関数外のため削除
     except Exception as e:
         print(f"⚠️ 価格チェックエラー: {e}")
-        # return None  # ← 関数外のため削除
+        log_error(f"⚠️ 価格チェックエラー: {e}")
+    print("[警告] 価格取得に失敗しNoneを返します。APIキーやネットワーク、取引所仕様を確認してください。")
+    return None
 
 
 
@@ -95,9 +91,24 @@ def send_notification(smtp_host, smtp_port, smtp_user, smtp_password, email_to, 
             server.login(smtp_user, smtp_password)
             server.sendmail(smtp_user, [email_to], msg.as_string())
         print(f"📧 通知メール送信: {subject}")
+        log_info(f"📧 通知メール送信: {subject}")
     except Exception as e:
         print(f"⚠️ メール送信エラー: {e}")
+        log_error(f"⚠️ メール送信エラー: {e}")
 # --- FundManager, _adapt_fund_manager_instance の定義（stagingから移植） ---
+# 本番/テスト切替用の簡易ロジック例
+def get_fund_manager(dry_run=True):
+    if dry_run:
+        return FundAdapter(initial_fund=100000, dry_run=True)
+    else:
+        # 本番用FundManagerをここでimportして返す
+        try:
+            from funds import FundManager
+            return FundManager()
+        except Exception as e:
+            print(f"FundManagerのインポートに失敗: {e}")
+            log_error(f"FundManagerのインポートに失敗: {e}")
+            return FundAdapter(initial_fund=100000, dry_run=True)
 import json
 from typing import Optional
 from pathlib import Path
@@ -575,6 +586,7 @@ def save_simple_log(message):
 
 def run_bot_di():
     print("run_bot_di: start")
+    interval_seconds = 10  # ループ間隔（秒）
     try:
         exchange = connect_to_bitbank()
         print("取引所接続OK")
@@ -586,6 +598,10 @@ def run_bot_di():
         try:
             print("ループ突入")
             price = get_latest_price(exchange)
+            if price is None:
+                print("価格取得失敗。スキップして継続します。")
+                time.sleep(interval_seconds)
+                continue
             print(f"現在価格: {price}")
             log_info(f"現在価格: {price}")
             save_simple_log(f"現在価格: {price}")
