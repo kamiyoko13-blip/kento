@@ -591,7 +591,9 @@ def run_bot_di():
         exchange = connect_to_bitbank()
         print("取引所接続OK")
     except Exception as e:
-        print(f"取引所接続エラー: {e}")
+        import traceback
+        print(f"取引所接続エラー: {e} ({type(e)})")
+        traceback.print_exc()
         log_error(f"取引所接続エラー: {e}")
         return
     while True:
@@ -612,11 +614,14 @@ def run_bot_di():
         time.sleep(interval_seconds)
 
 if __name__ == "__main__":
+    print("mainブロック実行開始")
     try:
         log_info("Bot起動中...")
         run_bot_di()
     except Exception as e:
-        print(f"Bot実行中にエラー: {e}")
+        import traceback
+        print(f"Bot実行中にエラー: {e} ({type(e)})")
+        traceback.print_exc()
         # 関数外のためreturn文は削除
 
 # ccxt がインストールされていない環境でもファイルが読み込めるよう、フォールバックのスタブを用意します。
