@@ -87,8 +87,12 @@ def main(argv: list[str]) -> int:
     return 0 if ok_all else 1
 
 if __name__ == '__main__':
-<<<<<<< HEAD
+
+
     raise SystemExit(main(sys.argv))
-=======
-    raise SystemExit(main(sys.argv))
->>>>>>> 74f1ab306ca4f7cbafdafeccf820148ccd40d52d
+
+
+
+
+
+

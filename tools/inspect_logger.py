@@ -1,4 +1,5 @@
-<<<<<<< HEAD
+
+
 import os, importlib
 
 # Ensure environment for logger
@@ -52,4 +53,32 @@ except Exception as e:
     print('failed to call m.log_info:', e)
 
 print('log file exists:', os.path.exists(os.path.join(os.environ['LOG_DIR'], 'notify_bot.log')))
->>>>>>> 74f1ab306ca4f7cbafdafeccf820148ccd40d52d
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+  
+ 
+         
+    
+       
+
+
+
+
+
+
+
+
+

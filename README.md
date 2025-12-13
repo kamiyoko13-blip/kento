@@ -1,5 +1,8 @@
-<<<<<<< HEAD
-<<<<<<< HEAD
+
+
+
+
+
 # notify_project — 小額自動売買ボット (簡易ドキュメント)
 
 このリポジトリには、少額運用向けに安全性を高めた自動売買ロジックが含まれます。
@@ -96,7 +99,10 @@ $env:DRY_RUN = '1'; $env:DRY_RUN_PRICE = '16000000'; $env:JAPANESE_YEN_BUDGET='2
 
 問題があれば journalctl の抜粋（systemd 実行時）や、`run_once.py` 実行ログをこちらに貼ってください。解析して次の修正案を出します。
 >>>>>>> 74f1ab306ca4f7cbafdafeccf820148ccd40d52d
+<<<<<<< HEAD
 =======
 # notify_project
 BTC自動売買用bot
 >>>>>>> 3093c5dc5eca64fccc824c7d6b98027dfebc7e05
+=======
+>>>>>>> fff5f634858926693a8e82d30e8e22d7b439fdc2

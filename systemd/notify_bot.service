@@ -1,4 +1,5 @@
-<<<<<<< HEAD
+
+
 [Unit]
 Description=Notify Bot (ninibo1127)
 After=network.target
@@ -18,24 +19,45 @@ SyslogIdentifier=notify_bot
 
 [Install]
 WantedBy=multi-user.target
-=======
-[Unit]
-Description=Notify Bot (ninibo1127)
-After=network.target
 
-[Service]
-Type=simple
-User=notifyuser
-Group=notifyuser
-WorkingDirectory=/opt/notify_project
-EnvironmentFile=/etc/notify_project/notify_bot.env
-ExecStart=/opt/notify_project/.venv/bin/python -u /opt/notify_project/ninibo1127.py
-Restart=on-failure
-RestartSec=10
-StandardOutput=syslog
-StandardError=syslog
-SyslogIdentifier=notify_bot
 
-[Install]
-WantedBy=multi-user.target
->>>>>>> 74f1ab306ca4f7cbafdafeccf820148ccd40d52d
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

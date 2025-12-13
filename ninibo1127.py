@@ -1,6 +1,13 @@
+import os
+
+print("[DEBUG] ファイル先頭到達")
+print("mainブロック実行開始")
+print("[DEBUG] mainブロックtry直前")
+
 class FundAdapter:
     def __init__(self, fund_manager=None, initial_fund=0.0, dry_run=True):
         self.fund = initial_fund
+        self.dry_run = dry_run  # DRY_RUN属性を保持
 
     def add_funds(self, amount):
         # 指定額をfundに加算
@@ -13,8 +20,14 @@ def execute_order(exchange, pair, order_type, amount, price=None):
     # Place order on Bitbank (ccxt)
     try:
         order = None
-
-        # 本番注文のみ実行
+        # FundAdapter経由ならdry_run属性も参照
+        dry_run = str(os.environ.get('DRY_RUN', '0')).lower() in ('1', 'true', 'yes', 'on')
+        if hasattr(exchange, 'dry_run') and getattr(exchange, 'dry_run'):
+            dry_run = True
+        if dry_run:
+            print(f"[DRY_RUN] {order_type}注文: {amount:.4f} {pair.split('/')[0]} @ {price if price else '（成行）'} 実際のAPI呼び出しは行いません")
+            log_info(f"[DRY_RUN] {order_type}注文: {amount:.4f} {pair.split('/')[0]} @ {price if price else '（成行）'} 実際のAPI呼び出しは行いません")
+            return {'id': 'dry_run', 'order_type': order_type, 'amount': amount, 'price': price}
 
         if order_type == 'buy':
             if price:
@@ -32,62 +45,28 @@ def execute_order(exchange, pair, order_type, amount, price=None):
 
         else:
             print(f"無効な注文タイプです: {order_type}")
-            
-            # return None  # ← 関数外のため削除
+            return None
 
         if order and isinstance(order, dict) and 'id' in order:
             print(f"注文成功: {order.get('id')}")
+            # 残高表示を追加
+            if hasattr(exchange, 'fetch_balance'):
+                try:
+                    balance = exchange.fetch_balance()
+                    print(f"現在の残高: {balance}")
+                except Exception as e:
+                    print(f"残高取得エラー: {e}")
             return order
         else:
             print(f"注文に失敗しました: {order}")
-            # return None  # ← 関数外のため削除
+            return None
 
     except Exception as e:
         import traceback
         traceback.print_exc()
         print(f"❌ 注文実行中にエラーが発生しました: {e}")
-        # return None  # ← 関数外のため削除
-# --- DI対応版のエントリーポイント ---
-import os
-def run_bot_di(dry_run=False, exchange_override=None):
-    """
-    Bot のメインエントリーポイント（DI対応）
-    Args:
-        dry_run (bool): True の場合、実際の取引を行わずログ出力のみ
-        exchange_override: テスト用の Exchange オブジェクト（None の場合は実際の取引所に接続）
-    Returns:
-        dict: 実行結果の辞書
-    """
-    required_env_vars = ["SMTP_HOST", "SMTP_PORT", "SMTP_USER", "SMTP_PASS", "TO_EMAIL", "API_KEY", "SECRET_KEY"]
-    missing_vars = [var for var in required_env_vars if not os.getenv(var)]
-    if missing_vars:
-        raise ValueError(f"以下の環境変数が .env に設定されていません: {', '.join(missing_vars)}")
-
-    print(f"🚀 Bot開始 (本番モード)")
-
-    # Exchange の準備
-    if exchange_override:
-        exchange = exchange_override
-    else:
-        exchange = connect_to_bitbank()
-        if not exchange:
-            return {"status": "error", "message": "取引所接続に失敗"}
-
-    # FundManager の準備
-    initial_fund = float(os.getenv('INITIAL_FUND', '20000'))
-    from pathlib import Path
-    _raw_fm = FundManager(initial_fund=initial_fund, state_file=os.getenv('FUND_STATE_FILE', 'funds_state.json'))
-    import time
-    try:
-        while True:
-            result = run_bot(exchange, _raw_fm, dry_run)
-            print("5分待機します...")
-            time.sleep(300)  # 5分ごとに判定
-        # returnはループ外（通常到達しない）
-        # return {"status": "success", "message": "Bot実行完了", "result": result}
-    except Exception as e:
-        return {"status": "error", "message": f"Bot実行中にエラー: {e}"}
-    # return None  # ← 関数外のため削除
+        log_error(f"❌ 注文実行中にエラーが発生しました: {e}")
+        return None
 # --- 価格取得のユーティリティ ---
 def get_latest_price(exchange, pair='BTC/JPY'):
     try:
@@ -96,11 +75,11 @@ def get_latest_price(exchange, pair='BTC/JPY'):
             return float(ticker['last'])
         if isinstance(ticker, dict) and 'close' in ticker:
             return float(ticker['close'])
-        # 他の型やエラー時
-        # return None  # ← 関数外のため削除
     except Exception as e:
         print(f"⚠️ 価格チェックエラー: {e}")
-        # return None  # ← 関数外のため削除
+        log_error(f"⚠️ 価格チェックエラー: {e}")
+    print("[警告] 価格取得に失敗しNoneを返します。APIキーやネットワーク、取引所仕様を確認してください。")
+    return None
 
 
 
@@ -118,9 +97,24 @@ def send_notification(smtp_host, smtp_port, smtp_user, smtp_password, email_to, 
             server.login(smtp_user, smtp_password)
             server.sendmail(smtp_user, [email_to], msg.as_string())
         print(f"📧 通知メール送信: {subject}")
+        log_info(f"📧 通知メール送信: {subject}")
     except Exception as e:
         print(f"⚠️ メール送信エラー: {e}")
+        log_error(f"⚠️ メール送信エラー: {e}")
 # --- FundManager, _adapt_fund_manager_instance の定義（stagingから移植） ---
+# 本番/テスト切替用の簡易ロジック例
+def get_fund_manager(dry_run=True):
+    if dry_run:
+        return FundAdapter(initial_fund=100000, dry_run=True)
+    else:
+        # 本番用FundManagerをここでimportして返す
+        try:
+            from funds import FundManager
+            return FundManager()
+        except Exception as e:
+            print(f"FundManagerのインポートに失敗: {e}")
+            log_error(f"FundManagerのインポートに失敗: {e}")
+            return FundAdapter(initial_fund=100000, dry_run=True)
 import json
 from typing import Optional
 from pathlib import Path
@@ -139,6 +133,151 @@ def _make_internal_fund_manager_class():
                     self._reserved = float(raw.get('reserved', 0.0))
             except Exception:
                 pass
+
+        def get_positions_reserved(self, positions_file='positions_state.json'):
+            """
+            positions_state.json から全ポジションの合計コスト(予約額)を計算
+            """
+            try:
+                pf = Path(positions_file)
+                if not pf.exists():
+                    return 0.0
+                with pf.open(encoding='utf-8') as f:
+                    data = json.load(f)
+                # Fix: if data is a dict with 'positions', use that
+                if isinstance(data, dict) and 'positions' in data:
+                    positions = data['positions']
+                else:
+                    positions = data
+                if not isinstance(positions, list):
+                    return 0.0
+                total = 0.0
+                for pos in positions:
+                    price = float(pos.get('price', 0))
+                    amount = float(pos.get('amount', 0))
+                    total += price * amount
+                return total
+            except Exception as e:
+                try:
+                    print(f"⚠️ positions_state.json予約額取得エラー: {e}")
+                except Exception:
+                    pass
+                return 0.0
+
+        def _persist(self):
+            if not self._state_file:
+                return
+            try:
+                obj = {'available': float(self._available), 'reserved': float(self._reserved)}
+                self._state_file.write_text(json.dumps(obj, ensure_ascii=False, indent=2), encoding='utf-8')
+            except Exception:
+                pass
+
+        def available_fund(self) -> float:
+            try:
+                return float(self._available)
+            except Exception:
+                return 0.0 
+
+        def place_order(self, cost: float) -> bool:
+            try:
+                c = float(cost)
+            except Exception:
+                return False
+            with self._lock:
+                if self._available < c:
+                    return False
+                self._available = float(self._available) - c
+                self._persist()
+            return True
+
+        def add_funds(self, amount: float) -> None:
+            try:
+                a = float(amount)
+            except Exception:
+                return
+            with self._lock:
+                self._available = float(self._available) + a
+                self._persist()
+
+        def reserve(self, cost: float) -> bool:
+            try:
+                c = float(cost)
+            except Exception:
+                return False
+            with self._lock:
+                # positions_state.jsonの合計予約額を取得
+                reserved_from_positions = self.get_positions_reserved()
+                try:
+                    print(f"予約フェーズ: 予約額（JPY）={reserved_from_positions}")
+                except Exception:
+                    pass
+                # 注文後に1000円以上残る場合のみ許可
+                if self._available - c < 1000:
+                    return False
+                self._available = float(self._available) - c
+                self._reserved = float(self._reserved) + c
+                self._persist()
+                return True
+
+        def confirm(self, cost: float) -> None:
+            try:
+                c = float(cost)
+            except Exception:
+                return
+            with self._lock:
+                self._reserved = max(0.0, float(self._reserved) - c)
+                self._persist()
+
+        def release(self, cost: float) -> None:
+            try:
+                c = float(cost)
+            except Exception:
+                return
+            with self._lock:
+                self._reserved = max(0.0, float(self._reserved) - c)
+                self._available = float(self._available) + c
+                self._persist()
+    return FundManagerStub
+
+def _make_internal_fund_manager_class():
+    class FundManagerStub:
+        def __init__(self, initial_fund: float = 0.0, state_file: Optional[str] = None):
+            import threading
+            self._lock = threading.Lock()
+            self._state_file = Path(state_file) if state_file else None
+            self._available = float(initial_fund or 0.0)
+            self._reserved = 0.0
+            try:
+                if self._state_file and self._state_file.exists():
+                    raw = json.loads(self._state_file.read_text(encoding='utf-8'))
+                    self._available = float(raw.get('available', self._available))
+                    self._reserved = float(raw.get('reserved', 0.0))
+            except Exception:
+                pass
+        def get_positions_reserved(self, positions_file='positions_state.json'):
+            try:
+                pf = Path(positions_file)
+                if not pf.exists():
+                    return 0.0
+                with pf.open(encoding='utf-8') as f:
+                    data = json.load(f)
+                if isinstance(data, dict) and 'positions' in data:
+                    data = data['positions']
+                if not isinstance(data, list):
+                    return 0.0
+                total = 0.0
+                for pos in data:
+                    price = float(pos.get('price', 0))
+                    amount = float(pos.get('amount', 0))
+                    total += price * amount
+                return total
+            except Exception as e:
+                try:
+                    print(f"⚠️ positions_state.json予約額取得エラー: {e}")
+                except Exception:
+                    pass
+                return 0.0
         def _persist(self):
             if not self._state_file:
                 return
@@ -177,7 +316,11 @@ def _make_internal_fund_manager_class():
             except Exception:
                 return False
             with self._lock:
-                # 注文後に1000円以上残る場合のみ許可
+                reserved_from_positions = self.get_positions_reserved()
+                try:
+                    print(f"予約フェーズ: 予約額（JPY）={reserved_from_positions}")
+                except Exception:
+                    pass
                 if self._available - c < 1000:
                     return False
                 self._available = float(self._available) - c
@@ -205,6 +348,7 @@ def _make_internal_fund_manager_class():
 
 _InternalFundManager = _make_internal_fund_manager_class()
 try:
+    pass  # ← ここに必要な処理があれば記述
     from funds import FundManager as _ImportedFundManager  # type: ignore
     required = ('available_fund', 'place_order', 'add_funds')
     if all(hasattr(_ImportedFundManager, name) for name in required):
@@ -238,11 +382,11 @@ class FundAdapter:
         except Exception:
             return False
         with self._lock:
-                # 注文後に1000円以上残る場合のみ許可
-                if self.available_fund() - c < 1000:
-                    return False
-                self._local_used += c
-                return True
+            # 注文後に1000円以上残る場合のみ許可
+            if self.available_fund() - c < 1000:
+                return False
+            self._local_used += c
+            return True
 
     def place_order(self, cost: float) -> bool:
         return self.reserve(cost)
@@ -379,12 +523,13 @@ class FundAdapter:
     def available_fund(self):
         return self.fund
 
+
     def reserve(self, amount):
-            # 注文後に1000円以上残る場合のみ許可
-            if self.fund - amount < 1000:
-                return False
-            self.fund -= amount
-            return True
+        # 注文後に1000円以上残る場合のみ許可
+        if self.fund - amount < 1000:
+            return False
+        self.fund -= amount
+        return True
 
     def place_order(self, amount):
         return self.reserve(amount)
@@ -399,6 +544,7 @@ class FundAdapter:
             return False
         self.fund -= amount
         return True
+
 
     def place_order(self, amount):
         # reserveと同じ動作
@@ -436,12 +582,67 @@ def connect_to_bitbank():
 
 # --- メイン実行部 ---
 # run_bot_diの定義より後ろで呼び出すように修正
+import time
+from datetime import datetime
+
+def save_simple_log(message):
+    with open("simple_bot.log", "a", encoding="utf-8") as f:
+        f.write(f"{datetime.now().isoformat()} {message}\n")
+
+
+def run_bot_di():
+    print("[DEBUG] run_bot_di最初のprint直前")
+    print("run_bot_di: start")
+    interval_seconds = 10  # ループ間隔（秒）
+    print("[DEBUG] run_bot_di: connect_to_bitbank()呼び出し前")
+    try:
+        api_key = os.getenv("API_KEY")
+        secret_key = os.getenv("SECRET_KEY")
+        # print(f"[DEBUG] API_KEY: {api_key}")  # セキュリティのため本番では表示しない
+        # print(f"[DEBUG] SECRET_KEY: {secret_key}")  # セキュリティのため本番では表示しない
+        exchange = connect_to_bitbank()
+        print(f"[DEBUG] connect_to_bitbank()返り値: {exchange}")
+        print("取引所接続OK")
+        print("[DEBUG] 取引所接続OK直後")
+    except Exception as e:
+        import traceback
+        print(f"[DEBUG] 取引所接続エラー: {e} ({type(e)})")
+        traceback.print_exc()
+        log_error(f"取引所接続エラー: {e}")
+        print("[DEBUG] run_bot_di: return直前")
+        return
+    print("[DEBUG] run_bot_di: while True直前")
+    while True:
+        try:
+            print("[DEBUG] ループ突入")
+            price = get_latest_price(exchange)
+            if price is None:
+                print("[DEBUG] 価格取得失敗。スキップして継続します。")
+                time.sleep(interval_seconds)
+                continue
+            print(f"[DEBUG] 現在価格: {price}")
+            log_info(f"現在価格: {price}")
+            save_simple_log(f"現在価格: {price}")
+            # ここに売買判断や注文処理を追加
+        except Exception as e:
+            print(f"[DEBUG] Botループ内で例外: {e}")
+            import traceback
+            traceback.print_exc()
+            log_error(f"Botループ内で例外: {e}")
+        print("[DEBUG] ループ末尾: sleep前")
+        time.sleep(interval_seconds)
+
 if __name__ == "__main__":
+    print("mainブロック実行開始")
     try:
         log_info("Bot起動中...")
+        print("[DEBUG] mainブロックでrun_bot_di()を呼びます")
         run_bot_di()
     except Exception as e:
-        print(f"Bot実行中にエラー: {e}")
+        import traceback
+        print("[DEBUG] main except節突入")
+        print(f"Bot実行中にエラー: {e} ({type(e)})")
+        traceback.print_exc()
         # 関数外のためreturn文は削除
 
 # ccxt がインストールされていない環境でもファイルが読み込めるよう、フォールバックのスタブを用意します。
@@ -451,11 +652,7 @@ try:
 except Exception:
     # 最低限のインターフェースを持つスタブ実装
     class AuthenticationError(Exception):
-            try:
-                log_info("Bot起動中...")
-                run_bot_di()
-            except Exception as e:
-                log_error(f"Bot起動時に例外: {e}")
+        pass
 # 日本標準時 (JST) のタイムゾーンオブジェクトを作成
 try:
     pass  # ← ここに必要な処理があれば記述
@@ -522,12 +719,11 @@ class ExchangeStub:
 
 # === プライベートAPI関数群（認証必須） ===
 
-def get_account_balance(exchange):
-    
+from typing import Dict, Any
+def get_account_balance(exchange) -> dict[str, dict[str, Any]]:
     """
-    アカウントの残高情報を取得します。
     Returns:
-        dict: { 'total': {...}, 'free': {...}, 'used': {...} }
+        dict[str, dict[str, Any]]: { 'total': {...}, 'free': {...}, 'used': {...} }
     """
     try:
         if str(os.getenv('DRY_RUN', '0')).lower() in ('1', 'true', 'yes', 'on'):
@@ -536,7 +732,6 @@ def get_account_balance(exchange):
                 'free': {'JPY': 100000.0, 'BTC': 0.0},
                 'used': {'JPY': 0.0, 'BTC': 0.0}
             }
-        
         balance = exchange.fetch_balance()
         return {
             'total': balance.get('total', {}),
@@ -1411,12 +1606,13 @@ def _ensure_fund_manager_has_funds(fm, initial_amount=None):
 
     # DEBUG: run_bot entry
     try:
+        DRY_RUN = os.getenv("DRY_RUN", "0").lower() in ["1", "true", "yes", "on"]
         log_debug(f"DEBUG: run_bot start - DRY_RUN={DRY_RUN}, pair={pair}")
     except Exception:
         log_debug("DEBUG: run_bot start (print failed)")
 
     # 実行時チェック: 必要な環境変数は dry_run のときは緩和する
-    env_dry_run = os.getenv("DRY_RUN", "").lower() in ["1", "true", "yes", "on"]
+    env_dry_run = str(os.getenv("DRY_RUN", "")).lower() in ["1", "true", "yes", "on"]
     if not env_dry_run:
         # 実運用時に必須の環境変数
         required_env_vars = ["SMTP_HOST", "SMTP_PORT", "SMTP_USER", "SMTP_PASS", "TO_EMAIL", "API_KEY", "SECRET_KEY"]
@@ -1522,8 +1718,20 @@ def run_bot(exchange, fund_manager, dry_run=False):
         amount = pos['amount']
         nampin_count = pos.get('nampin_count', 0)
         take_profit_price = custom_take_profit if custom_take_profit else buy_price * 1.10
+        debug_log_msg = f"[DEBUG] 利確判定: 現在価格={current_price}, 利確価格={take_profit_price}, 買値={buy_price}, 数量={amount}"
+        print(debug_log_msg)
+        with open("sell_debug.log", "a", encoding="utf-8") as dbglog:
+            dbglog.write(debug_log_msg + "\n")
         if current_price >= take_profit_price:
+            debug_log_msg2 = f"[DEBUG] 売却条件成立: {current_price} >= {take_profit_price} で売却実行"
+            print(debug_log_msg2)
+            with open("sell_debug.log", "a", encoding="utf-8") as dbglog:
+                dbglog.write(debug_log_msg2 + "\n")
             order = execute_order(exchange, PAIR, 'sell', amount)
+            debug_log_msg3 = f"[DEBUG] 売却注文結果: {order}"
+            print(debug_log_msg3)
+            with open("sell_debug.log", "a", encoding="utf-8") as dbglog:
+                dbglog.write(debug_log_msg3 + "\n")
             fund_manager.add_funds(current_price * amount)
             updated_positions.remove(pos)
             try:
@@ -1540,7 +1748,10 @@ def run_bot(exchange, fund_manager, dry_run=False):
             except Exception as e:
                 print(f"⚠️ 売却通知メール送信エラー: {e}")
         elif nampin_count < MAX_NAMPIN and current_price <= buy_price * (1 - nampin_interval * (nampin_count + 1)):
+            # 注文直前で最新価格・数量・コストを再取得しログ出力
+            current_price = get_latest_price(exchange, PAIR)
             add_cost = current_price * amount
+            log_info(f"ナンピン注文直前: 最新価格={current_price} 数量={amount} コスト={add_cost}")
             if fund_manager.available_fund() - add_cost >= 1000:
                 if fund_manager.place_order(add_cost):
                     order = execute_order(exchange, PAIR, 'buy', amount, current_price)
