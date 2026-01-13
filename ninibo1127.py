@@ -1,3 +1,15 @@
+def get_last_buy_price(state):
+    """
+    state(dict)からlast_buy_priceを取得
+    """
+    return state.get("last_buy_price")
+
+def set_last_buy_price(state, price):
+    """
+    state(dict)にlast_buy_priceを保存
+    """
+    state["last_buy_price"] = float(price) if price is not None else None
+
 # --- DI対応のDRY_RUNラッパー関数 ---
 def run_bot_di(dry_run=True):
     import os
@@ -98,22 +110,31 @@ def get_latest_price(exchange, pair='BTC/JPY'):
     return None
 
 # --- 売買判定ロジック ---
-def trade_decision(current_price, btc_balance=0.0027, sell_btc=0.02, buy_btc=0.02, buy_price=13100000, sell_price=14400000, fee_jpy=1000):
+def trade_decision(current_price, btc_balance=0.0027, buy_btc=0.02, last_buy_price=None, rsi=None, bb_lower=None):
     """
     current_price: 現在のBTC/JPY価格
     btc_balance: 現在のBTC総保有量
-    base_btc: 売買対象のBTC量（デフォルト0.02BTC）
-    buy_price: 買い基準価格（デフォルト1310万円）
-    sell_price: 売り基準価格（デフォルト1440万円）
+    buy_btc: 売買対象のBTC量（デフォルト0.02BTC）
+    last_buy_price: 直近の買値（売却判定に使用）
+    rsi: 最新のRSI値
+    bb_lower: ボリンジャーバンド下限
     """
-    # 10%ルールの売買判定ロジックは削除しました。必要に応じてRSIやボリンジャーバンドの判定ロジックを利用してください。
+    # デバッグ用: 各値を出力
+    print(f"[DEBUG] trade_decision: current_price={current_price}, btc_balance={btc_balance}, last_buy_price={last_buy_price}, rsi={rsi}, bb_lower={bb_lower}")
+    # 売り判定: 保有BTCがあり、現在価格が直近買値の10%上昇（利確）
+    if btc_balance > 0 and last_buy_price is not None and current_price >= last_buy_price * 1.10:
+        return {'action': 'sell', 'amount': btc_balance, 'price': current_price, 'sell_condition': True}
+    # 買い判定: BTC未保有、RSI<=30 または BB下限タッチ
+    if btc_balance == 0 and ((rsi is not None and rsi <= 30) or (bb_lower is not None and current_price <= bb_lower)):
+        return {'action': 'buy', 'amount': buy_btc, 'price': current_price, 'buy_condition': True}
+    # 何もしない
     return {'action': 'hold', 'amount': 0.0, 'price': current_price, 'buy_condition': False, 'sell_condition': False}
 
 # --- BTC残高を売買結果で更新する ---
 def update_btc_balance(btc_balance, trade_result):
     """
     btc_balance: 現在のBTC残高
-    trade_result: trade_decisionの戻り値（dict）
+    trade_result: nの戻り値（dict）
     """
     action = trade_result.get('action')
     amount = trade_result.get('amount', 0.0)
@@ -1359,7 +1380,7 @@ def _ensure_fund_manager_has_funds(fm, initial_amount=None):
     # DEBUG: run_bot entry
     try:
         DRY_RUN = os.getenv("DRY_RUN", "0").lower() in ["1", "true", "yes", "on"]
-        log_debug(f"DEBUG: run_bot start - DRY_RUN={DRY_RUN}, pair={pair}")
+        log_debug(f"DEBUG: run_bot start - DRY_RUN={DRY_RUN}")
     except Exception:
         log_debug("DEBUG: run_bot start (print failed)")
 
@@ -1431,27 +1452,56 @@ def run_bot(exchange, fund_manager, dry_run=False):
     import json
     import time
     positions_file = 'positions_state.json'  # ファイル名を必ず固定
-    # ポジション情報の読み込み
+    # ポジション情報とlast_buy_priceの読み込み
+    state = {}
+    positions = []
+    last_buy_price = None
     if os.path.exists(positions_file):
         try:
             with open(positions_file, 'r', encoding='utf-8') as f:
-                positions = json.load(f)
+                loaded = json.load(f)
+            # dict形式（新）とリスト形式（旧）両対応
+            if isinstance(loaded, dict):
+                positions = loaded.get('positions', [])
+                last_buy_price = loaded.get('last_buy_price')
+            elif isinstance(loaded, list):
+                positions = loaded
+                last_buy_price = positions[-1]['price'] if positions else None
+            set_last_buy_price(state, last_buy_price)
         except Exception:
             positions = []
+            set_last_buy_price(state, None)
     else:
         positions = []
+        set_last_buy_price(state, None)
     try:
         while True:
+            # positions_state.json再読込
             try:
-                with open('positions_state.json', 'r', encoding='utf-8') as f:
-                    positions = json.load(f)
+                with open(positions_file, 'r', encoding='utf-8') as f:
+                    loaded = json.load(f)
+                if isinstance(loaded, dict):
+                    positions = loaded.get('positions', [])
+                    last_buy_price = loaded.get('last_buy_price')
+                elif isinstance(loaded, list):
+                    positions = loaded
+                    last_buy_price = positions[-1]['price'] if positions else None
+                set_last_buy_price(state, last_buy_price)
                 logging.info(f"positions読み込み直後: {positions}")
                 print(f"[DEBUG] positions読み込み直後: {positions}", flush=True)
+                print(f"[DEBUG] last_buy_price: {last_buy_price}", flush=True)
                 # 現在価格取得
                 current_price = get_latest_price(exchange, 'BTC/JPY')
                 logging.info(f"現在価格: {current_price}")
                 print(f"[DEBUG] 現在価格: {current_price}", flush=True)
-                print("[DEBUG] 売却判定: 条件不成立", flush=True)
+                # 売買判定
+                btc_balance = sum([float(pos.get('amount', 0)) for pos in positions])
+                td = trade_decision(current_price, btc_balance, MIN_ORDER_BTC, last_buy_price)
+                print(f"[DEBUG] trade_decision result: {td}", flush=True)
+                if td.get('action') == 'sell':
+                    print("[DEBUG] 売り判定: 条件成立", flush=True)
+                else:
+                    print("[DEBUG] 売り判定: 条件不成立", flush=True)
             except Exception as e:
                 logging.error(f"positionsファイル読み込み例外: {e}")
                 print(f"[ERROR] positionsファイル読み込み例外: {e}", flush=True)
@@ -1477,6 +1527,8 @@ def run_bot(exchange, fund_manager, dry_run=False):
                 order = execute_order(exchange, PAIR, 'buy', MIN_ORDER_BTC, current_price)
 
                 updated_positions.append({'price': current_price, 'amount': MIN_ORDER_BTC, 'timestamp': time.time()})
+                # last_buy_priceを更新
+                set_last_buy_price(state, current_price)
                 try:
                     smtp_host = os.getenv('SMTP_HOST')
                     smtp_port = int(os.getenv('SMTP_PORT', '587'))
@@ -1491,10 +1543,18 @@ def run_bot(exchange, fund_manager, dry_run=False):
                 except Exception as e:
                     print(f"⚠️ 購入通知メール送信エラー: {e}")
 
-    # ポジション情報の保存
+    # ポジション情報とlast_buy_priceの保存
     try:
+        # last_buy_priceも一緒に保存
+        save_obj = updated_positions.copy()
+        # last_buy_priceを別ファイルやpositions_state.jsonに保存したい場合は下記のように拡張可能
+        # ここではpositions_state.jsonにlast_buy_priceも含めて保存（リスト＋値の混在を避ける場合はdict化推奨）
+        save_data = {
+            "positions": updated_positions,
+            "last_buy_price": get_last_buy_price(state)
+        }
         with open(positions_file, 'w', encoding='utf-8') as f:
-            json.dump(updated_positions, f, ensure_ascii=False, indent=2)
+            json.dump(save_data, f, ensure_ascii=False, indent=2)
     except Exception as e:
         print(f"ポジション保存エラー: {e}")
 
