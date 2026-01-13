@@ -1,3 +1,185 @@
+# --- メインループ（Botの実行部分） ---
+def run_bot(exchange, fund_manager, dry_run=False):
+    # 板情報取得
+    try:
+        orderbook = exchange.fetch_order_book('BTC/JPY')
+        bids = orderbook.get('bids', [])
+        asks = orderbook.get('asks', [])
+        current_price = get_latest_price(exchange, 'BTC/JPY')
+        # 厚い買い板・売り板判定
+        bids_near = [bid for bid in bids if abs(bid[0] - current_price) < current_price * 0.01]
+        asks_near = [ask for ask in asks if abs(ask[0] - current_price) < current_price * 0.01]
+        avg_bid_size = sum([b[1] for b in bids_near]) / len(bids_near) if bids_near else 0
+        avg_ask_size = sum([a[1] for a in asks_near]) / len(asks_near) if asks_near else 0
+        # 買い板が厚い場合（平均の2倍以上）
+        if bids_near and any(b[1] > avg_bid_size * 2 for b in bids_near):
+            try:
+                smtp_host = os.getenv('SMTP_HOST')
+                smtp_port = int(os.getenv('SMTP_PORT', '587'))
+                smtp_user = os.getenv('SMTP_USER')
+                smtp_password = os.getenv('SMTP_PASS')
+                email_to = os.getenv('TO_EMAIL')
+                if smtp_host and email_to:
+                    now = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                    subject = f"厚い買い板付近:資金投入推奨 {now}"
+                    message = f"【板情報】\n時刻: {now}\n現在価格: {current_price} 円\n厚い買い板付近です。資金投入を推奨します。"
+                    send_notification(smtp_host, smtp_port, smtp_user, smtp_password, email_to, subject, message)
+            except Exception as e:
+                print(f"⚠️ 板資金投入通知メール送信エラー: {e}")
+        # 売り板が厚い場合（平均の2倍以上）
+        if asks_near and any(a[1] > avg_ask_size * 2 for a in asks_near):
+            thick_ask_price = max([a[0] for a in asks_near if a[1] > avg_ask_size * 2])
+            custom_take_profit = thick_ask_price
+        else:
+            custom_take_profit = None
+        # 板が薄い場合（買い板・売り板とも平均の半分以下）
+        if (avg_bid_size < 0.5 * (sum([b[1] for b in bids]) / len(bids) if bids else 1)) and (avg_ask_size < 0.5 * (sum([a[1] for a in asks]) / len(asks) if asks else 1)):
+            nampin_interval = 0.20
+        else:
+            nampin_interval = 0.10
+    except Exception as e:
+        print(f"⚠️ 板情報取得・判定エラー: {e}")
+        custom_take_profit = None
+        nampin_interval = 0.10
+
+    PAIR = 'BTC/JPY'
+    PROFIT_TAKE_PCT = 10.0
+    BUY_MORE_PCT = 10.0
+    MIN_ORDER_BTC = 0.001
+
+    import json
+    import time
+    positions_file = 'positions_state.json'  # ファイル名を必ず固定
+    # ポジション情報とlast_buy_priceの読み込み
+    state = {}
+    positions = []
+    last_buy_price = None
+    if os.path.exists(positions_file):
+        try:
+            with open(positions_file, 'r', encoding='utf-8') as f:
+                loaded = json.load(f)
+            # dict形式（新）とリスト形式（旧）両対応
+            if isinstance(loaded, dict):
+                positions = loaded.get('positions', [])
+                last_buy_price = loaded.get('last_buy_price')
+            elif isinstance(loaded, list):
+                positions = loaded
+                last_buy_price = positions[-1]['price'] if positions else None
+            set_last_buy_price(state, last_buy_price)
+        except Exception:
+            positions = []
+            set_last_buy_price(state, None)
+    else:
+        positions = []
+        set_last_buy_price(state, None)
+    try:
+        while True:
+            # positions_state.json再読込
+            try:
+                with open(positions_file, 'r', encoding='utf-8') as f:
+                    loaded = json.load(f)
+                if isinstance(loaded, dict):
+                    positions = loaded.get('positions', [])
+                    last_buy_price = loaded.get('last_buy_price')
+                elif isinstance(loaded, list):
+                    positions = loaded
+                    last_buy_price = positions[-1]['price'] if positions else None
+                set_last_buy_price(state, last_buy_price)
+                logging.info(f"positions読み込み直後: {positions}")
+                print(f"[DEBUG] positions読み込み直後: {positions}", flush=True)
+                print(f"[DEBUG] last_buy_price: {last_buy_price}", flush=True)
+                # 現在価格取得
+                current_price = get_latest_price(exchange, 'BTC/JPY')
+                logging.info(f"現在価格: {current_price}")
+                print(f"[DEBUG] 現在価格: {current_price}", flush=True)
+                # 売買判定
+                btc_balance = sum([float(pos.get('amount', 0)) for pos in positions])
+                # trade_decisionでpositions[0]['price']を参照できるようbuiltinsにセット
+                import builtins
+                builtins.positions = positions
+                td = trade_decision(current_price, btc_balance, MIN_ORDER_BTC, last_buy_price)
+                print(f"[DEBUG] trade_decision result: {td}", flush=True)
+                if td.get('action') == 'sell':
+                    print("[DEBUG] 売り判定: 条件成立", flush=True)
+                    # 売り注文を実行
+                    try:
+                        # ポジション全て売却
+                        sell_results = sell_all_positions(positions, exchange, PAIR)
+                        print(f"[DEBUG] 売却結果: {sell_results}", flush=True)
+                        # ポジション情報をクリア
+                        positions = []
+                        set_last_buy_price(state, None)
+                        # 保存
+                        save_data = {
+                            "positions": positions,
+                            "last_buy_price": get_last_buy_price(state)
+                        }
+                        with open(positions_file, 'w', encoding='utf-8') as f:
+                            json.dump(save_data, f, ensure_ascii=False, indent=2)
+                        print("[DEBUG] 売却後、ポジション情報クリア・保存", flush=True)
+                    except Exception as e:
+                        print(f"[ERROR] 売却処理例外: {e}", flush=True)
+                else:
+                    print("[DEBUG] 売り判定: 条件不成立", flush=True)
+            except Exception as e:
+                logging.error(f"positionsファイル読み込み例外: {e}")
+                print(f"[ERROR] positionsファイル読み込み例外: {e}", flush=True)
+            logging.info("ループ末尾: sleep前")
+            print("[DEBUG] ループ末尾: sleep前", flush=True)
+            time.sleep(10)
+            logging.info("ループ突入")
+            print("[DEBUG] ループ突入", flush=True)
+    except Exception as e:
+        logging.error(f"メインループ内で例外発生: {e}")
+        print(f"[ERROR] メインループ内で例外発生: {e}", flush=True)
+        import traceback
+        traceback.print_exc()
+
+    # ポジションが空のときだけ買い判定
+    updated_positions = []
+    if not updated_positions:
+        prev_high = max([float(pos['price']) for pos in positions]) if positions else current_price
+        buy_threshold = prev_high * 0.9
+        buy_cost = current_price * MIN_ORDER_BTC
+        if current_price <= buy_threshold and fund_manager.available_fund() - buy_cost >= 1000:
+            if fund_manager.place_order(buy_cost):
+                order = execute_order(exchange, PAIR, 'buy', MIN_ORDER_BTC, current_price)
+
+                updated_positions.append({'price': current_price, 'amount': MIN_ORDER_BTC, 'timestamp': time.time()})
+                # last_buy_priceを更新
+                set_last_buy_price(state, current_price)
+                try:
+                    smtp_host = os.getenv('SMTP_HOST')
+                    smtp_port = int(os.getenv('SMTP_PORT', '587'))
+                    smtp_user = os.getenv('SMTP_USER')
+                    smtp_password = os.getenv('SMTP_PASS')
+                    email_to = os.getenv('TO_EMAIL')
+                    if smtp_host and email_to:
+                        now = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                        subject = f"BTC購入通知 {now}"
+                        message = f"【BTC購入】\n時刻: {now}\n数量: {MIN_ORDER_BTC} BTC\n価格: {current_price} 円"
+                        send_notification(smtp_host, smtp_port, smtp_user, smtp_password, email_to, subject, message)
+                except Exception as e:
+                    print(f"⚠️ 購入通知メール送信エラー: {e}")
+
+    # ポジション情報とlast_buy_priceの保存
+    try:
+        # last_buy_priceも一緒に保存
+        save_obj = updated_positions.copy()
+        # last_buy_priceを別ファイルやpositions_state.jsonに保存したい場合は下記のように拡張可能
+        # ここではpositions_state.jsonにlast_buy_priceも含めて保存（リスト＋値の混在を避ける場合はdict化推奨）
+        save_data = {
+            "positions": updated_positions,
+            "last_buy_price": get_last_buy_price(state)
+        }
+        with open(positions_file, 'w', encoding='utf-8') as f:
+            json.dump(save_data, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        print(f"ポジション保存エラー: {e}")
+
+    import time
+    time.sleep(10)  # 10秒待機
+    return "run_bot executed"
 def get_last_buy_price(state):
     """
     state(dict)からlast_buy_priceを取得
@@ -28,10 +210,16 @@ def run_bot_di(dry_run=True):
 def connect_to_bitbank():
     import ccxt
     import os
+    # 先にDRY_RUN判定
+    dry_run = str(os.getenv('DRY_RUN', '')).lower() in ('1', 'true', 'yes', 'on')
+    if dry_run:
+        print("[DEBUG] connect_to_bitbank: DRY_RUNモードなのでAPIキー不要")
+        return None  # またはダミーのexchangeオブジェクト
     api_key = os.getenv("API_KEY")
     secret_key = os.getenv("SECRET_KEY")
     if not api_key or not secret_key:
         raise ValueError("API_KEYまたはSECRET_KEYが環境変数に設定されていません")
+    import ccxt
     return ccxt.bitbank({
         'apiKey': api_key,
         'secret': secret_key,
@@ -121,8 +309,21 @@ def trade_decision(current_price, btc_balance=0.0027, buy_btc=0.02, last_buy_pri
     """
     # デバッグ用: 各値を出力
     print(f"[DEBUG] trade_decision: current_price={current_price}, btc_balance={btc_balance}, last_buy_price={last_buy_price}, rsi={rsi}, bb_lower={bb_lower}")
-    # 売り判定: 保有BTCがあり、現在価格が直近買値の10%上昇（利確）
-    if btc_balance > 0 and last_buy_price is not None and current_price >= last_buy_price * 1.10:
+    # 売り判定: 保有BTCがあり、現在価格が最初の買値の10%上昇（利確）
+    # ポジションの最初の買値を基準にする
+    first_buy_price = None
+    try:
+        # グローバルなpositions変数があれば参照
+        import builtins
+        positions = getattr(builtins, 'positions', None)
+        if positions and isinstance(positions, list) and len(positions) > 0:
+            first_buy_price = float(positions[0].get('price', 0))
+    except Exception:
+        pass
+    # fallback: last_buy_price
+    if first_buy_price is None:
+        first_buy_price = last_buy_price
+    if btc_balance > 0 and first_buy_price is not None and current_price > first_buy_price * 1.10:
         return {'action': 'sell', 'amount': btc_balance, 'price': current_price, 'sell_condition': True}
     # 買い判定: BTC未保有、RSI<=30 または BB下限タッチ
     if btc_balance == 0 and ((rsi is not None and rsi <= 30) or (bb_lower is not None and current_price <= bb_lower)):
@@ -131,6 +332,25 @@ def trade_decision(current_price, btc_balance=0.0027, buy_btc=0.02, last_buy_pri
     return {'action': 'hold', 'amount': 0.0, 'price': current_price, 'buy_condition': False, 'sell_condition': False}
 
 # --- BTC残高を売買結果で更新する ---
+def sell_all_positions(positions, exchange, pair):
+    """
+    保有ポジション全量を売却する（ダミー実装）
+    positions: 保有ポジションリスト
+    exchange: ccxtの取引所オブジェクト
+    pair: 通貨ペア（例: 'BTC/JPY'）
+    """
+    results = []
+    for pos in positions:
+        amount = pos.get('amount', 0)
+        try:
+            # 成行売り注文を発行
+            order = exchange.create_market_sell_order(pair, amount)
+            print(f"[DEBUG] 売却APIレスポンス: {order}", flush=True)
+            results.append({'amount': amount, 'order': order, 'status': 'sold'})
+        except Exception as e:
+            print(f"[ERROR] 売却APIエラー: {e}", flush=True)
+            results.append({'amount': amount, 'error': str(e), 'status': 'error'})
+    return results
 def update_btc_balance(btc_balance, trade_result):
     """
     btc_balance: 現在のBTC残高
@@ -144,6 +364,8 @@ def update_btc_balance(btc_balance, trade_result):
         btc_balance += amount
     return btc_balance
 import os
+from dotenv import load_dotenv
+load_dotenv()
 def get_dry_run_flag():
     return str(os.getenv('DRY_RUN', '')).lower() in ('1', 'true', 'yes', 'on')
 import logging
@@ -151,23 +373,27 @@ import logging
 logging.basicConfig(filename='simple_bot.log', level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s', filemode='w')
 logging.info("ロギング初期化完了")
 
-print("[DEBUG] ファイル先頭到達")
-print("mainブロック実行開始")
-print("[DEBUG] mainブロックtry直前")
 
-class FundAdapter:
-    def __init__(self, fund_manager=None, initial_fund=0.0, dry_run=True):
-        self.fund = initial_fund
-        self.dry_run = dry_run  # DRY_RUN属性を保持
+if __name__ == "__main__":
+    print("[DEBUG] ファイル先頭到達")
+    print("mainブロック実行開始")
+    print("[DEBUG] mainブロックtry直前")
+    try:
+        # ExchangeとFundManagerの初期化
+        print("[DEBUG] Exchange初期化直前")
+        exchange = connect_to_bitbank()
+        print("[DEBUG] FundManager初期化直前")
+        fund_manager = None  # 必要ならFundManagerクラスをここで初期化
+        print("[DEBUG] run_bot呼び出し直前")
+        run_bot(exchange, fund_manager)
+        print("[DEBUG] mainブロックtry直後（run_bot呼び出し後）")
+    except Exception as e:
+        print(f"[ERROR] mainブロック例外: {e}")
+        import traceback
+        traceback.print_exc()
 
-    def add_funds(self, amount):
-        # 指定額をfundに加算
-        self.fund += amount
-        return True
 
-# --- 注文実行ユーティリティ ---
-def execute_order(exchange, pair, order_type, amount, price=None):
-    # Place order on Bitbank (ccxt)
+# --- メインループ（Botの実行部分） ---
     order = None
 import json
 from typing import Optional
@@ -536,11 +762,6 @@ def log_warn(*args, **kwargs):
 
 # --- 未定義グローバル変数・定数・関数のダミー定義・import ---
 import os
-try:
-    from dotenv import load_dotenv
-    load_dotenv()
-except ImportError:
-    pass
 
 # Add FileLock import for file locking
 try:
@@ -1400,6 +1621,47 @@ def _ensure_fund_manager_has_funds(fm, initial_amount=None):
     exchange = None
     if 'exchange' not in locals() or exchange is None:
         exchange = connect_to_bitbank()
+        # 板情報取得
+        try:
+            orderbook = exchange.fetch_order_book('BTC/JPY')
+            bids = orderbook.get('bids', [])
+            asks = orderbook.get('asks', [])
+            current_price = get_latest_price(exchange, 'BTC/JPY')
+            # 厚い買い板・売り板判定
+            bids_near = [bid for bid in bids if abs(bid[0] - current_price) < current_price * 0.01]
+            asks_near = [ask for ask in asks if abs(ask[0] - current_price) < current_price * 0.01]
+            avg_bid_size = sum([b[1] for b in bids_near]) / len(bids_near) if bids_near else 0
+            avg_ask_size = sum([a[1] for a in asks_near]) / len(asks_near) if asks_near else 0
+            # 買い板が厚い場合（平均の2倍以上）
+            if bids_near and any(b[1] > avg_bid_size * 2 for b in bids_near):
+                try:
+                    smtp_host = os.getenv('SMTP_HOST')
+                    smtp_port = int(os.getenv('SMTP_PORT', '587'))
+                    smtp_user = os.getenv('SMTP_USER')
+                    smtp_password = os.getenv('SMTP_PASS')
+                    email_to = os.getenv('TO_EMAIL')
+                    if smtp_host and email_to:
+                        now = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                        subject = f"厚い買い板付近:資金投入推奨 {now}"
+                        message = f"【板情報】\n時刻: {now}\n現在価格: {current_price} 円\n厚い買い板付近です。資金投入を推奨します。"
+                        send_notification(smtp_host, smtp_port, smtp_user, smtp_password, email_to, subject, message)
+                except Exception as e:
+                    print(f"⚠️ 板資金投入通知メール送信エラー: {e}")
+            # 売り板が厚い場合（平均の2倍以上）
+            if asks_near and any(a[1] > avg_ask_size * 2 for a in asks_near):
+                thick_ask_price = max([a[0] for a in asks_near if a[1] > avg_ask_size * 2])
+                custom_take_profit = thick_ask_price
+            else:
+                custom_take_profit = None
+            # 板が薄い場合（買い板・売り板とも平均の半分以下）
+            if (avg_bid_size < 0.5 * (sum([b[1] for b in bids]) / len(bids) if bids else 1)) and (avg_ask_size < 0.5 * (sum([a[1] for a in asks]) / len(asks) if asks else 1)):
+                nampin_interval = 0.20
+            else:
+                nampin_interval = 0.10
+        except Exception as e:
+            print(f"⚠️ 板情報取得・判定エラー: {e}")
+            custom_take_profit = None
+            nampin_interval = 0.10
 
 def run_bot(exchange, fund_manager, dry_run=False):
     # 板情報取得
@@ -1500,6 +1762,24 @@ def run_bot(exchange, fund_manager, dry_run=False):
                 print(f"[DEBUG] trade_decision result: {td}", flush=True)
                 if td.get('action') == 'sell':
                     print("[DEBUG] 売り判定: 条件成立", flush=True)
+                    # 売り注文を実行
+                    try:
+                        # ポジション全て売却
+                        sell_results = sell_all_positions(positions, exchange, PAIR)
+                        print(f"[DEBUG] 売却結果: {sell_results}", flush=True)
+                        # ポジション情報をクリア
+                        positions = []
+                        set_last_buy_price(state, None)
+                        # 保存
+                        save_data = {
+                            "positions": positions,
+                            "last_buy_price": get_last_buy_price(state)
+                        }
+                        with open(positions_file, 'w', encoding='utf-8') as f:
+                            json.dump(save_data, f, ensure_ascii=False, indent=2)
+                        print("[DEBUG] 売却後、ポジション情報クリア・保存", flush=True)
+                    except Exception as e:
+                        print(f"[ERROR] 売却処理例外: {e}", flush=True)
                 else:
                     print("[DEBUG] 売り判定: 条件不成立", flush=True)
             except Exception as e:
