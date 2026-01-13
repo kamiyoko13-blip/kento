@@ -5,8 +5,4 @@ if not p:
     sys.exit(0)
 with open(p,'r',encoding='utf-8') as f:
     s=json.load(f)
-<<<<<<< HEAD
 print(json.dumps(s, ensure_ascii=True, indent=2))
-=======
-print(json.dumps(s, ensure_ascii=True, indent=2))
->>>>>>> 74f1ab306ca4f7cbafdafeccf820148ccd40d52d

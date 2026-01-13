@@ -11,8 +11,4 @@ out = {
   'positions': s.get('positions'),
   'last_buy_time': s.get('last_buy_time') if 'last_buy_time' in s else None
 }
-<<<<<<< HEAD
 print(json.dumps(out, ensure_ascii=True, indent=2))
-=======
-print(json.dumps(out, ensure_ascii=True, indent=2))
->>>>>>> 74f1ab306ca4f7cbafdafeccf820148ccd40d52d

@@ -43,8 +43,4 @@ try:
         except Exception as fe:
             print("fetch_ohlcv failed:", repr(fe))
 except Exception:
-<<<<<<< HEAD
     traceback.print_exc()
-=======
-    traceback.print_exc()
->>>>>>> 74f1ab306ca4f7cbafdafeccf820148ccd40d52d
