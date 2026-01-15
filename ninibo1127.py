@@ -11,60 +11,58 @@ def run_bot(exchange, fund_manager, dry_run=False):
         asks_near = [ask for ask in asks if abs(ask[0] - current_price) < current_price * 0.01]
         avg_bid_size = sum([b[1] for b in bids_near]) / len(bids_near) if bids_near else 0
         avg_ask_size = sum([a[1] for a in asks_near]) / len(asks_near) if asks_near else 0
-        # 買い板が厚い場合（平均の2倍以上）
-        # 価格トレンド・RSI・BBも考慮して通知
-        if bids_near and any(b[1] > avg_bid_size * 2 for b in bids_near):
-            # 価格が下落傾向かつRSI低い/BB下限付近なら買い推奨
-            price_trend = None
-            try:
-                closes = [float(pos['price']) for pos in positions] if positions else [current_price]
-                if len(closes) >= 2:
-                    price_trend = closes[-1] - closes[-2]
-            except Exception:
-                price_trend = None
-            # インジケータ取得
-            indicators = compute_indicators(exchange, pair='BTC/JPY', timeframe='1h', limit=1000)
-            rsi = indicators.get('rsi_14')
+
+        # インジケータ取得
+        indicators = compute_indicators(exchange, pair='BTC/JPY', timeframe='1h', limit=1000)
+        rsi = indicators.get('rsi_14')
+        bb_lower = None
+        bb_upper = None
+        try:
+            import numpy as np
+            closes = [float(pos['price']) for pos in positions] if positions else [current_price]
+            period = 14
+            if len(closes) >= period:
+                sma = np.mean(closes[-period:])
+                std = np.std(closes[-period:])
+                bb_lower = sma - 2 * std
+                bb_upper = sma + 2 * std
+        except Exception:
             bb_lower = None
+            bb_upper = None
+
+        # 買い判定: RSI25～28かつBB-2σ下限タッチ/はみ出し、かつ現値の0.1～0.3%下に明らかに厚い買い板
+        buy_board = [bid for bid in bids if (current_price * 0.997 <= bid[0] <= current_price * 0.999) and bid[1] > avg_bid_size * 2]
+        if (rsi is not None and 25 <= rsi <= 28) and (bb_lower is not None and current_price <= bb_lower) and buy_board:
             try:
-                import numpy as np
-                period = 14
-                if len(closes) >= period:
-                    sma = np.mean(closes[-period:])
-                    std = np.std(closes[-period:])
-                    bb_lower = sma - 2 * std
-            except Exception:
-                bb_lower = None
-            # 条件: 価格下落 or RSI<=30 or BB下限付近
-            if (price_trend is not None and price_trend < 0) or (rsi is not None and rsi <= 30) or (bb_lower is not None and current_price <= bb_lower):
-                try:
-                    smtp_host = os.getenv('SMTP_HOST')
-                    smtp_port = int(os.getenv('SMTP_PORT', '587'))
-                    smtp_user = os.getenv('SMTP_USER')
-                    smtp_password = os.getenv('SMTP_PASS')
-                    email_to = os.getenv('TO_EMAIL')
-                    if smtp_host and email_to:
-                        now = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-                        subject = f"厚い買い板付近:買い推奨 {now}"
-                        message = f"【板情報】\n時刻: {now}\n現在価格: {current_price} 円\n厚い買い板+下落/RSI/BB条件で買い推奨。"
-                        send_notification(smtp_host, smtp_port, smtp_user, smtp_password, email_to, subject, message)
-                except Exception as e:
-                    print(f"⚠️ 板資金投入通知メール送信エラー: {e}")
-            # 価格上昇 or RSI高い or BB上限付近なら売り推奨
-            elif (price_trend is not None and price_trend > 0) or (rsi is not None and rsi >= 70) or (bb_lower is not None and current_price >= bb_lower * 1.1):
-                try:
-                    smtp_host = os.getenv('SMTP_HOST')
-                    smtp_port = int(os.getenv('SMTP_PORT', '587'))
-                    smtp_user = os.getenv('SMTP_USER')
-                    smtp_password = os.getenv('SMTP_PASS')
-                    email_to = os.getenv('TO_EMAIL')
-                    if smtp_host and email_to:
-                        now = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-                        subject = f"厚い買い板付近:売り警戒 {now}"
-                        message = f"【板情報】\n時刻: {now}\n現在価格: {current_price} 円\n厚い買い板+上昇/RSI/BB条件で売り警戒。"
-                        send_notification(smtp_host, smtp_port, smtp_user, smtp_password, email_to, subject, message)
-                except Exception as e:
-                    print(f"⚠️ 板売り警戒通知メール送信エラー: {e}")
+                smtp_host = os.getenv('SMTP_HOST')
+                smtp_port = int(os.getenv('SMTP_PORT', '587'))
+                smtp_user = os.getenv('SMTP_USER')
+                smtp_password = os.getenv('SMTP_PASS')
+                email_to = os.getenv('TO_EMAIL')
+                if smtp_host and email_to:
+                    now = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                    subject = f"【買いシグナル】RSI25-28+BB-2σ下限+厚い買い板 {now}"
+                    message = f"【板情報】\n時刻: {now}\n現在価格: {current_price} 円\nRSI: {rsi}\nBB下限: {bb_lower}\n厚い買い板: {buy_board}\n条件揃いで買い推奨。"
+                    send_notification(smtp_host, smtp_port, smtp_user, smtp_password, email_to, subject, message)
+            except Exception as e:
+                print(f"⚠️ 買いシグナルメール送信エラー: {e}")
+
+        # 売り判定: RSI65～75かつBB+2σタッチ/はみ出し、かつ現値の0.1～0.3%上に明らかに厚い売り板
+        sell_board = [ask for ask in asks if (current_price * 1.001 <= ask[0] <= current_price * 1.003) and ask[1] > avg_ask_size * 2]
+        if (rsi is not None and 65 <= rsi <= 75) and (bb_upper is not None and current_price >= bb_upper) and sell_board:
+            try:
+                smtp_host = os.getenv('SMTP_HOST')
+                smtp_port = int(os.getenv('SMTP_PORT', '587'))
+                smtp_user = os.getenv('SMTP_USER')
+                smtp_password = os.getenv('SMTP_PASS')
+                email_to = os.getenv('TO_EMAIL')
+                if smtp_host and email_to:
+                    now = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                    subject = f"【売りシグナル】RSI65-75+BB+2σ上限+厚い売り板 {now}"
+                    message = f"【板情報】\n時刻: {now}\n現在価格: {current_price} 円\nRSI: {rsi}\nBB上限: {bb_upper}\n厚い売り板: {sell_board}\n条件揃いで売り推奨。"
+                    send_notification(smtp_host, smtp_port, smtp_user, smtp_password, email_to, subject, message)
+            except Exception as e:
+                print(f"⚠️ 売りシグナルメール送信エラー: {e}")
         # 売り板が厚い場合（平均の2倍以上）
         if asks_near and any(a[1] > avg_ask_size * 2 for a in asks_near):
             thick_ask_price = max([a[0] for a in asks_near if a[1] > avg_ask_size * 2])
