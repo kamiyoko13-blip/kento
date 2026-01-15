@@ -1,116 +1,154 @@
 # --- メインループ（Botの実行部分） ---
 def run_bot(exchange, fund_manager, dry_run=False):
-    # 板情報取得
-    try:
-        orderbook = exchange.fetch_order_book('BTC/JPY')
-        bids = orderbook.get('bids', [])
-        asks = orderbook.get('asks', [])
-        current_price = get_latest_price(exchange, 'BTC/JPY')
-        # 厚い買い板・売り板判定
-        bids_near = [bid for bid in bids if abs(bid[0] - current_price) < current_price * 0.01]
-        asks_near = [ask for ask in asks if abs(ask[0] - current_price) < current_price * 0.01]
-        avg_bid_size = sum([b[1] for b in bids_near]) / len(bids_near) if bids_near else 0
-        avg_ask_size = sum([a[1] for a in asks_near]) / len(asks_near) if asks_near else 0
-
-        # インジケータ取得
-        indicators = compute_indicators(exchange, pair='BTC/JPY', timeframe='1h', limit=1000)
-        rsi = indicators.get('rsi_14')
-        bb_lower = None
-        bb_upper = None
-        try:
-            import numpy as np
-            closes = [float(pos['price']) for pos in positions] if positions else [current_price]
-            period = 14
-            if len(closes) >= period:
-                sma = np.mean(closes[-period:])
-                std = np.std(closes[-period:])
-                bb_lower = sma - 2 * std
-                bb_upper = sma + 2 * std
-        except Exception:
-            bb_lower = None
-            bb_upper = None
-
-        # 買い判定: RSI25～28かつBB-2σ下限タッチ/はみ出し、かつ現値の0.1～0.3%下に明らかに厚い買い板
-        buy_board = [bid for bid in bids if (current_price * 0.997 <= bid[0] <= current_price * 0.999) and bid[1] > avg_bid_size * 2]
-        if (rsi is not None and 25 <= rsi <= 28) and (bb_lower is not None and current_price <= bb_lower) and buy_board:
-            try:
-                smtp_host = os.getenv('SMTP_HOST')
-                smtp_port = int(os.getenv('SMTP_PORT', '587'))
-                smtp_user = os.getenv('SMTP_USER')
-                smtp_password = os.getenv('SMTP_PASS')
-                email_to = os.getenv('TO_EMAIL')
-                if smtp_host and email_to:
-                    now = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-                    subject = f"【買いシグナル】RSI25-28+BB-2σ下限+厚い買い板 {now}"
-                    message = f"【板情報】\n時刻: {now}\n現在価格: {current_price} 円\nRSI: {rsi}\nBB下限: {bb_lower}\n厚い買い板: {buy_board}\n条件揃いで買い推奨。"
-                    send_notification(smtp_host, smtp_port, smtp_user, smtp_password, email_to, subject, message)
-            except Exception as e:
-                print(f"⚠️ 買いシグナルメール送信エラー: {e}")
-
-        # 売り判定: RSI65～75かつBB+2σタッチ/はみ出し、かつ現値の0.1～0.3%上に明らかに厚い売り板
-        sell_board = [ask for ask in asks if (current_price * 1.001 <= ask[0] <= current_price * 1.003) and ask[1] > avg_ask_size * 2]
-        if (rsi is not None and 65 <= rsi <= 75) and (bb_upper is not None and current_price >= bb_upper) and sell_board:
-            try:
-                smtp_host = os.getenv('SMTP_HOST')
-                smtp_port = int(os.getenv('SMTP_PORT', '587'))
-                smtp_user = os.getenv('SMTP_USER')
-                smtp_password = os.getenv('SMTP_PASS')
-                email_to = os.getenv('TO_EMAIL')
-                if smtp_host and email_to:
-                    now = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-                    subject = f"【売りシグナル】RSI65-75+BB+2σ上限+厚い売り板 {now}"
-                    message = f"【板情報】\n時刻: {now}\n現在価格: {current_price} 円\nRSI: {rsi}\nBB上限: {bb_upper}\n厚い売り板: {sell_board}\n条件揃いで売り推奨。"
-                    send_notification(smtp_host, smtp_port, smtp_user, smtp_password, email_to, subject, message)
-            except Exception as e:
-                print(f"⚠️ 売りシグナルメール送信エラー: {e}")
-        # 売り板が厚い場合（平均の2倍以上）
-        if asks_near and any(a[1] > avg_ask_size * 2 for a in asks_near):
-            thick_ask_price = max([a[0] for a in asks_near if a[1] > avg_ask_size * 2])
-            custom_take_profit = thick_ask_price
-        else:
-            custom_take_profit = None
-        # 板が薄い場合（買い板・売り板とも平均の半分以下）
-        if (avg_bid_size < 0.5 * (sum([b[1] for b in bids]) / len(bids) if bids else 1)) and (avg_ask_size < 0.5 * (sum([a[1] for a in asks]) / len(asks) if asks else 1)):
-            nampin_interval = 0.20
-        else:
-            nampin_interval = 0.10
-    except Exception as e:
-        print(f"⚠️ 板情報取得・判定エラー: {e}")
-        custom_take_profit = None
-        nampin_interval = 0.10
-
+    import time
+    # --- 必要な定数・変数を関数内で初期化 ---
     PAIR = 'BTC/JPY'
     PROFIT_TAKE_PCT = 10.0
     BUY_MORE_PCT = 10.0
     MIN_ORDER_BTC = 0.001
-
-    import json
-    import time
-    positions_file = 'positions_state.json'  # ファイル名を必ず固定
-    # ポジション情報とlast_buy_priceの読み込み
-    state = {}
+    positions_file = 'positions_state.json'
+    state = {'last_buy_price': None}
     positions = []
+    updated_positions = []
     last_buy_price = None
-    if os.path.exists(positions_file):
+    while True:
+        # 1時間足RSIによるエントリー見送り判定
+        indicators_1h = compute_indicators(exchange, pair='BTC/JPY', timeframe='1h', limit=100)
+        rsi_1h_list = indicators_1h.get('rsi_list', None)
+        rsi_1h = indicators_1h.get('rsi_14')
+        skip_entry = False
+        if rsi_1h_list and len(rsi_1h_list) >= 2:
+            prev_rsi_1h = rsi_1h_list[-2]
+            latest_rsi_1h = rsi_1h_list[-1]
+            # 1時間足RSI>40で上昇orレンジ
+            if latest_rsi_1h > 40 and latest_rsi_1h >= prev_rsi_1h:
+                skip_entry = True
+            # 1時間足RSI<40で下落orレンジ
+            elif latest_rsi_1h < 40 and latest_rsi_1h <= prev_rsi_1h:
+                skip_entry = True
+        if skip_entry:
+            print(f"[INFO] 1時間足RSI条件でエントリー見送り: RSI(前): {prev_rsi_1h}, RSI(最新): {latest_rsi_1h}", flush=True)
+            time.sleep(10)
+            continue
+
+        # --- 板情報・インジケータ取得 ---
         try:
-            with open(positions_file, 'r', encoding='utf-8') as f:
-                loaded = json.load(f)
-            # dict形式（新）とリスト形式（旧）両対応
-            if isinstance(loaded, dict):
-                positions = loaded.get('positions', [])
-                last_buy_price = loaded.get('last_buy_price')
-            elif isinstance(loaded, list):
-                positions = loaded
-                last_buy_price = positions[-1]['price'] if positions else None
-            set_last_buy_price(state, last_buy_price)
-        except Exception:
-            positions = []
-            set_last_buy_price(state, None)
-    else:
-        positions = []
-        set_last_buy_price(state, None)
-    try:
-        while True:
+            orderbook = exchange.fetch_order_book('BTC/JPY')
+            bids = orderbook.get('bids', [])
+            asks = orderbook.get('asks', [])
+            current_price = get_latest_price(exchange, 'BTC/JPY')
+            bids_near = [bid for bid in bids if abs(bid[0] - current_price) < current_price * 0.01]
+            asks_near = [ask for ask in asks if abs(ask[0] - current_price) < current_price * 0.01]
+            avg_bid_size = sum([b[1] for b in bids_near]) / len(bids_near) if bids_near else 0
+            avg_ask_size = sum([a[1] for a in asks_near]) / len(asks_near) if asks_near else 0
+
+            indicators = compute_indicators(exchange, pair='BTC/JPY', timeframe='5m', limit=1000)
+            rsi_list = indicators.get('rsi_list', None)
+            rsi = indicators.get('rsi_14')
+            bb_lower = None
+            bb_upper = None
+            try:
+                import numpy as np
+                closes = [float(pos['price']) for pos in positions] if positions else [current_price]
+                period = 14
+                if len(closes) >= period:
+                    sma = np.mean(closes[-period:])
+                    std = np.std(closes[-period:])
+                    bb_lower = sma - 2 * std
+                    bb_upper = sma + 2 * std
+            except Exception:
+                bb_lower = None
+                bb_upper = None
+
+            # --- RSI反発ロジック ---
+            buy_board = [bid for bid in bids if (current_price * 0.997 <= bid[0] <= current_price * 0.999) and bid[1] > avg_bid_size * 2]
+            rsi_buy_signal = False
+            prev_rsi = None
+            latest_rsi = None
+            if rsi_list and len(rsi_list) >= 2:
+                prev_rsi = rsi_list[-2]
+                latest_rsi = rsi_list[-1]
+                if 25 <= prev_rsi <= 28 and latest_rsi > prev_rsi:
+                    rsi_buy_signal = True
+            if rsi_buy_signal and (bb_lower is not None and current_price <= bb_lower) and buy_board:
+                try:
+                    smtp_host = os.getenv('SMTP_HOST')
+                    smtp_port = int(os.getenv('SMTP_PORT', '465'))
+                    smtp_user = os.getenv('SMTP_USER')
+                    smtp_password = os.getenv('SMTP_PASS')
+                    email_to = os.getenv('TO_EMAIL')
+                    if smtp_host and email_to:
+                        now = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                        subject = f"【買いシグナル】RSI反発+BB-2σ下限+厚い買い板 {now}"
+                        message = f"【板情報】\n時刻: {now}\n現在価格: {current_price} 円\nRSI(前): {prev_rsi}\nRSI(最新): {latest_rsi}\nBB下限: {bb_lower}\n厚い買い板: {buy_board}\n条件揃いで買い推奨。"
+                        send_notification(smtp_host, smtp_port, smtp_user, smtp_password, email_to, subject, message)
+                except Exception as e:
+                    print(f"⚠️ 買いシグナルメール送信エラー: {e}")
+
+            # --- 5分足トレーリングストップ売り判定 ---
+            sell_board = [ask for ask in asks if (current_price * 1.001 <= ask[0] <= current_price * 1.003) and ask[1] > avg_ask_size * 2]
+            trailing_start_pct = 0.05  # +5%でトレーリング開始
+            trailing_width_pct = 0.04  # 直近高値から-4%で売り
+            stop_loss_pct = -0.06      # -6%で損切り
+            entry_price = None
+            if positions and len(positions) > 0:
+                entry_price = float(positions[0].get('price', 0))
+            trailing_high = None
+            try:
+                closes_5m = [float(r[4]) for r in exchange.fetch_ohlcv('BTC/JPY', timeframe='5m', limit=20)]
+                trailing_high = max(closes_5m) if closes_5m else None
+            except Exception:
+                trailing_high = None
+            trailing_sell = False
+            trailing_reason = ""
+            if entry_price and trailing_high:
+                if current_price >= entry_price * (1 + trailing_start_pct):
+                    trigger_price = trailing_high * (1 - trailing_width_pct)
+                    if current_price <= trigger_price:
+                        trailing_sell = True
+                        trailing_reason = f"トレーリングストップ発動: 直近高値({trailing_high})から-4%({trigger_price})割れ"
+            stop_loss = False
+            stop_loss_reason = ""
+            if entry_price and current_price <= entry_price * (1 + stop_loss_pct):
+                stop_loss = True
+                stop_loss_reason = f"損切り発動: 買値({entry_price})から-6%({entry_price * (1 + stop_loss_pct)})割れ"
+            if trailing_sell or stop_loss or ((rsi is not None and 65 <= rsi <= 75) and (bb_upper is not None and current_price >= bb_upper)):
+                try:
+                    smtp_host = os.getenv('SMTP_HOST')
+                    smtp_port = int(os.getenv('SMTP_PORT', '465'))
+                    smtp_user = os.getenv('SMTP_USER')
+                    smtp_password = os.getenv('SMTP_PASS')
+                    email_to = os.getenv('TO_EMAIL')
+                    if smtp_host and email_to:
+                        now = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                        if trailing_sell:
+                            subject = f"【売りシグナル】トレーリングストップ発動 {now}"
+                            message = f"【トレーリングストップ】\n時刻: {now}\n現在価格: {current_price} 円\n直近高値: {trailing_high}\nトリガー価格: {trigger_price}\n買値: {entry_price}\n{trailing_reason}"
+                        elif stop_loss:
+                            subject = f"【売りシグナル】損切り発動 {now}"
+                            message = f"【損切り】\n時刻: {now}\n現在価格: {current_price} 円\n買値: {entry_price}\n{stop_loss_reason}"
+                        else:
+                            subject = f"【売りシグナル】RSI65-75+BB+2σ上限+厚い売り板 {now}"
+                            message = f"【板情報】\n時刻: {now}\n現在価格: {current_price} 円\nRSI: {rsi}\nBB上限: {bb_upper}\n厚い売り板: {sell_board}\n条件揃いで売り推奨。"
+                        send_notification(smtp_host, smtp_port, smtp_user, smtp_password, email_to, subject, message)
+                except Exception as e:
+                    print(f"⚠️ 売りシグナルメール送信エラー: {e}")
+            # 売り板が厚い場合（平均の2倍以上）
+            custom_take_profit = None
+            if asks_near and any(a[1] > avg_ask_size * 2 for a in asks_near):
+                thick_ask_price = max([a[0] for a in asks_near if a[1] > avg_ask_size * 2])
+                custom_take_profit = thick_ask_price
+            # 板が薄い場合（買い板・売り板とも平均の半分以下）
+            nampin_interval = 0.10
+            if (avg_bid_size < 0.5 * (sum([b[1] for b in bids]) / len(bids) if bids else 1)) and (avg_ask_size < 0.5 * (sum([a[1] for a in asks]) / len(asks) if asks else 1)):
+                nampin_interval = 0.20
+        except Exception as e:
+            print(f"⚠️ 板情報取得・判定エラー: {e}")
+        time.sleep(10)
+
+        # --- positions_state.jsonの再読込・保存・売買判定・注文・通知ロジックをここで統合 ---
+        try:
+            import json
             # positions_state.json再読込
             try:
                 with open(positions_file, 'r', encoding='utf-8') as f:
@@ -122,161 +160,244 @@ def run_bot(exchange, fund_manager, dry_run=False):
                     positions = loaded
                     last_buy_price = positions[-1]['price'] if positions else None
                 set_last_buy_price(state, last_buy_price)
-                logging.info(f"positions読み込み直後: {positions}")
-                print(f"[DEBUG] positions読み込み直後: {positions}", flush=True)
-                print(f"[DEBUG] last_buy_price: {last_buy_price}", flush=True)
-                # --- API残高取得とDEBUG出力 ---
-                try:
-                    api_balance = get_account_balance(exchange)
-                    print(f"[DEBUG] API balance取得結果: {api_balance}", flush=True)
-                    btc_api_balance = api_balance.get('free', {}).get('BTC', 0)
-                    print(f"[DEBUG] API BTC残高: {btc_api_balance}", flush=True)
-                except Exception as e:
-                    print(f"[ERROR] API残高取得例外: {e}", flush=True)
-                # 現在価格取得
-                current_price = get_latest_price(exchange, 'BTC/JPY')
-                logging.info(f"現在価格: {current_price}")
-                print(f"[DEBUG] 現在価格: {current_price}", flush=True)
-                # 売買判定
-                btc_balance = sum([float(pos.get('amount', 0)) for pos in positions])
-                # trade_decisionでpositions[0]['price']を参照できるようbuiltinsにセット
-                import builtins
-                builtins.positions = positions
-                # --- インジケータ取得 ---
-                indicators = compute_indicators(exchange, pair=PAIR, timeframe='1h', limit=1000)
-                rsi = indicators.get('rsi_14')
-                # BB下限はSMA-2σ相当を仮定（compute_indicatorsで未算出ならNone）
+            except Exception:
+                positions = []
+                set_last_buy_price(state, None)
+
+            # --- API残高取得とDEBUG出力 ---
+            try:
+                api_balance = get_account_balance(exchange)
+                btc_api_balance = api_balance.get('free', {}).get('BTC', 0)
+                use_btc = btc_api_balance * 0.8
+            except Exception:
+                pass
+
+            # 現在価格取得
+            current_price = get_latest_price(exchange, PAIR)
+            btc_balance = sum([float(pos.get('amount', 0)) for pos in positions])
+            import builtins
+            builtins.positions = positions
+
+            # --- インジケータ取得 ---
+            indicators = compute_indicators(exchange, pair=PAIR, timeframe='5m', limit=1000)
+            rsi = indicators.get('rsi_14')
+            bb_lower = None
+            try:
+                closes = [float(pos['price']) for pos in positions] if positions else [current_price]
+                import numpy as np
+                period = 14
+                if len(closes) >= period:
+                    sma = np.mean(closes[-period:])
+                    std = np.std(closes[-period:])
+                    bb_lower = sma - 2 * std
+            except Exception:
                 bb_lower = None
-                # BB下限を計算（SMA-2σ）
-                try:
-                    closes = [float(pos['price']) for pos in positions] if positions else [current_price]
-                    import numpy as np
-                    period = 14
-                    if len(closes) >= period:
-                        sma = np.mean(closes[-period:])
-                        std = np.std(closes[-period:])
-                        bb_lower = sma - 2 * std
-                except Exception:
-                    bb_lower = None
-                td = trade_decision(current_price, btc_balance, MIN_ORDER_BTC, last_buy_price, rsi, bb_lower)
-                print(f"[DEBUG] trade_decision result: {td}", flush=True)
-                # --- メール通知ロジック ---
-                smtp_host = os.getenv('SMTP_HOST')
-                smtp_port = int(os.getenv('SMTP_PORT', '587'))
-                smtp_user = os.getenv('SMTP_USER')
-                smtp_password = os.getenv('SMTP_PASS')
-                email_to = os.getenv('TO_EMAIL')
-                now = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-                reason = ""
-                if td.get('action') == 'sell':
-                    print("[DEBUG] 売り判定: 条件成立", flush=True)
-                    reason = "利確条件成立（買値より10%以上上昇）"
-                    if smtp_host and email_to:
-                        subject = f"【売りシグナル】BTC売却推奨 {now}"
-                        message = f"【売りシグナル】\n時刻: {now}\n現在価格: {current_price} 円\nRSI: {rsi}\nBB下限: {bb_lower}\n根拠: {reason}"
-                        send_notification(smtp_host, smtp_port, smtp_user, smtp_password, email_to, subject, message)
-                    # 売り注文を実行
-                    try:
-                        # ポジション全て売却
-                        sell_results = sell_all_positions(positions, exchange, PAIR)
-                        print(f"[DEBUG] 売却結果: {sell_results}", flush=True)
-                        # ポジション情報をクリア
-                        positions = []
-                        set_last_buy_price(state, None)
-                        # 保存
-                        save_data = {
-                            "positions": positions,
-                            "last_buy_price": get_last_buy_price(state)
-                        }
-                        with open(positions_file, 'w', encoding='utf-8') as f:
-                            json.dump(save_data, f, ensure_ascii=False, indent=2)
-                        print("[DEBUG] 売却後、ポジション情報クリア・保存", flush=True)
-                    except Exception as e:
-                        print(f"[ERROR] 売却処理例外: {e}", flush=True)
-                elif td.get('action') == 'buy':
-                    print("[DEBUG] 買い判定: 条件成立", flush=True)
-                    if rsi is not None and rsi <= 30:
-                        reason = f"RSIが30以下（現在値: {rsi}）"
-                    elif bb_lower is not None and current_price <= bb_lower:
-                        reason = f"価格がBB下限（{bb_lower}）以下"
-                    else:
-                        reason = "買い条件成立"
-                    if smtp_host and email_to:
-                        subject = f"【買いシグナル】BTC購入推奨 {now}"
-                        message = f"【買いシグナル】\n時刻: {now}\n現在価格: {current_price} 円\nRSI: {rsi}\nBB下限: {bb_lower}\n根拠: {reason}"
-                        send_notification(smtp_host, smtp_port, smtp_user, smtp_password, email_to, subject, message)
-                else:
-                    print("[DEBUG] 売買判定: ホールド", flush=True)
-            except Exception as e:
-                logging.error(f"positionsファイル読み込み例外: {e}")
-                print(f"[ERROR] positionsファイル読み込み例外: {e}", flush=True)
-            logging.info("ループ末尾: sleep前")
-            print("[DEBUG] ループ末尾: sleep前", flush=True)
-            time.sleep(10)
-            logging.info("ループ突入")
-            print("[DEBUG] ループ突入", flush=True)
-    except Exception as e:
-        logging.error(f"メインループ内で例外発生: {e}")
-        print(f"[ERROR] メインループ内で例外発生: {e}", flush=True)
-        import traceback
-        traceback.print_exc()
 
-    # ポジションが空のときだけ買い判定
-    updated_positions = []
-    if not updated_positions:
-        prev_high = max([float(pos['price']) for pos in positions]) if positions else current_price
-        buy_threshold = prev_high * 0.9
-        buy_cost = current_price * MIN_ORDER_BTC
-        if current_price <= buy_threshold and fund_manager.available_fund() - buy_cost >= 1000:
-            if fund_manager.place_order(buy_cost):
-                order = execute_order(exchange, PAIR, 'buy', MIN_ORDER_BTC, current_price)
+            td = trade_decision(current_price, btc_balance, MIN_ORDER_BTC, last_buy_price, rsi, bb_lower)
 
-                updated_positions.append({'price': current_price, 'amount': MIN_ORDER_BTC, 'timestamp': time.time()})
-                # last_buy_priceを更新
-                set_last_buy_price(state, current_price)
+            # --- メール通知ロジック ---
+            smtp_host = os.getenv('SMTP_HOST')
+            smtp_port = int(os.getenv('SMTP_PORT', '465'))
+            smtp_user = os.getenv('SMTP_USER')
+            smtp_password = os.getenv('SMTP_PASS')
+            email_to = os.getenv('TO_EMAIL')
+            now = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            reason = ""
+            import logging
+            if td.get('action') == 'sell':
+                reason = "利確条件成立（買値より10%以上上昇）"
+                if smtp_host and email_to:
+                    subject = f"【売りシグナル】BTC売却推奨 {now}"
+                    message = f"【売りシグナル】\n時刻: {now}\n現在価格: {current_price} 円\nRSI: {rsi}\nBB下限: {bb_lower}\n根拠: {reason}"
+                    send_notification(smtp_host, smtp_port, smtp_user, smtp_password, email_to, subject, message)
                 try:
-                    smtp_host = os.getenv('SMTP_HOST')
-                    smtp_port = int(os.getenv('SMTP_PORT', '587'))
-                    smtp_user = os.getenv('SMTP_USER')
-                    smtp_password = os.getenv('SMTP_PASS')
-                    email_to = os.getenv('TO_EMAIL')
-                    if smtp_host and email_to:
-                        now = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-                        subject = f"BTC購入通知 {now}"
-                        message = f"【BTC購入】\n時刻: {now}\n数量: {MIN_ORDER_BTC} BTC\n価格: {current_price} 円"
-                        send_notification(smtp_host, smtp_port, smtp_user, smtp_password, email_to, subject, message)
+                    sell_results = sell_all_positions(positions, exchange, PAIR)
+                    positions = []
+                    set_last_buy_price(state, None)
+                    save_data = {
+                        "positions": positions,
+                        "last_buy_price": get_last_buy_price(state)
+                    }
+                    with open(positions_file, 'w', encoding='utf-8') as f:
+                        json.dump(save_data, f, ensure_ascii=False, indent=2)
                 except Exception as e:
-                    print(f"⚠️ 購入通知メール送信エラー: {e}")
+                    print(f"[ERROR] 売却処理例外: {e}", flush=True)
+            elif td.get('action') == 'buy':
+                if rsi is not None and rsi <= 30:
+                    reason = f"RSIが30以下（現在値: {rsi}）"
+                elif bb_lower is not None and current_price <= bb_lower:
+                    reason = f"価格がBB下限（{bb_lower}）以下"
+                else:
+                    reason = "買い条件成立"
+                if smtp_host and email_to:
+                    subject = f"【買いシグナル】BTC購入推奨 {now}"
+                    message = f"【買いシグナル】\n時刻: {now}\n現在価格: {current_price} 円\nRSI: {rsi}\nBB下限: {bb_lower}\n根拠: {reason}"
+                    send_notification(smtp_host, smtp_port, smtp_user, smtp_password, email_to, subject, message)
+            # --- ポジションが空のときだけ買い判定 ---
+            if not positions:
+                prev_high = current_price
+                buy_threshold = prev_high * 0.9
+                buy_cost = current_price * MIN_ORDER_BTC
+                if current_price <= buy_threshold and fund_manager.available_fund() - buy_cost >= 1000:
+                    if fund_manager.place_order(buy_cost):
+                        order = execute_order(exchange, PAIR, 'buy', MIN_ORDER_BTC, current_price)
+                        updated_positions.append({'price': current_price, 'amount': MIN_ORDER_BTC, 'timestamp': time.time()})
+                        set_last_buy_price(state, current_price)
+                        try:
+                            if smtp_host and email_to:
+                                subject = f"BTC購入通知 {now}"
+                                message = f"【BTC購入】\n時刻: {now}\n数量: {MIN_ORDER_BTC} BTC\n価格: {current_price} 円"
+                                send_notification(smtp_host, smtp_port, smtp_user, smtp_password, email_to, subject, message)
+                        except Exception as e:
+                            print(f"⚠️ 購入通知メール送信エラー: {e}")
+                        # ポジション情報とlast_buy_priceの保存
+                        try:
+                            save_data = {
+                                "positions": updated_positions,
+                                "last_buy_price": get_last_buy_price(state)
+                            }
+                            with open(positions_file, 'w', encoding='utf-8') as f:
+                                json.dump(save_data, f, ensure_ascii=False, indent=2)
+                        except Exception as e:
+                            print(f"ポジション保存エラー: {e}")
+        except Exception as e:
+            print(f"[ERROR] run_botメインループ例外: {e}", flush=True)
+    # --- 残高取得ユーティリティ ---
+import os
+import datetime
+import logging
+import numpy as np
+import builtins
+from typing import Dict, Any
 
-    # ポジション情報とlast_buy_priceの保存
+def get_account_balance(exchange) -> dict[str, dict[str, Any]]:
+        """
+        Returns:
+            dict[str, dict[str, Any]]: { 'total': {...}, 'free': {...}, 'used': {...} }
+        """
+        try:
+            if str(os.getenv('DRY_RUN', '0')).lower() in ('1', 'true', 'yes', 'on'):
+                return {
+                    'total': {'JPY': 100000.0, 'BTC': 0.0},
+                    'free': {'JPY': 100000.0, 'BTC': 0.0},
+                    'used': {'JPY': 0.0, 'BTC': 0.0}
+                }
+            balance = exchange.fetch_balance()
+            return {
+                'total': balance.get('total', {}),
+                'free': balance.get('free', {}),
+                'used': balance.get('used', {})
+            }
+        except Exception as e:
+            try:
+                logging.error(f"❌ 残高取得エラー: {e}")
+            except Exception:
+                pass
+            return {'total': {}, 'free': {}, 'used': {}}
+
+def compute_indicators(exchange, pair='BTC/JPY', timeframe='1h', limit=1000):
+    # Fetch OHLCV and compute a set of indicators. Returns dict of values (may contain None).
     try:
-        # last_buy_priceも一緒に保存
-        save_obj = updated_positions.copy()
-        # last_buy_priceを別ファイルやpositions_state.jsonに保存したい場合は下記のように拡張可能
-        # ここではpositions_state.jsonにlast_buy_priceも含めて保存（リスト＋値の混在を避ける場合はdict化推奨）
-        save_data = {
-            "positions": updated_positions,
-            "last_buy_price": get_last_buy_price(state)
-        }
-        with open(positions_file, 'w', encoding='utf-8') as f:
-            json.dump(save_data, f, ensure_ascii=False, indent=2)
-    except Exception as e:
-        print(f"ポジション保存エラー: {e}")
+        # OHLCVデータ取得（本番用: 取引所APIから取得）
+        raw = exchange.fetch_ohlcv(pair, timeframe=timeframe, limit=limit)
+        indicators = {}
+        # prepare lists
+        closes = [float(r[4]) for r in raw if r and len(r) >= 5 and r[4] is not None]
+        highs = [float(r[2]) for r in raw if r and len(r) >= 3 and r[2] is not None]
+        lows = [float(r[3]) for r in raw if r and len(r) >= 4 and r[3] is not None]
 
-    import time
-    time.sleep(10)  # 10秒待機
-    return "run_bot executed"
-def get_last_buy_price(state):
-    """
-    state(dict)からlast_buy_priceを取得
-    """
-    return state.get("last_buy_price")
+        indicators['latest_close'] = closes[-1] if closes else None
+        indicators['sma_short_50'] = compute_sma_from_list(closes, 50)
+        indicators['sma_long_200'] = compute_sma_from_list(closes, 200)
+        indicators['ema_12'] = compute_ema(closes, 12)
+        indicators['ema_26'] = compute_ema(closes, 26)
+        indicators['atr_14'] = compute_atr(raw, period=14)
+        # RSIリスト（反発判定用）
+        if len(closes) >= 14:
+            rsi_list = [compute_rsi(closes[:i], period=14, exchange=exchange, pair=pair) for i in range(14, len(closes)+1)]
+            indicators['rsi_list'] = rsi_list
+            indicators['rsi_14'] = rsi_list[-1] if rsi_list else None
+        else:
+            indicators['rsi_list'] = None
+            indicators['rsi_14'] = None
+        # recent high over 20 periods
+        try:
+            indicators['recent_high_20'] = max(highs[-20:]) if highs and len(highs) >= 1 else None
+        except Exception:
+            indicators['recent_high_20'] = None
+
+        return indicators
+    except Exception:
+        return {
+            'sma_short_50': None,
+            'sma_long_200': None,
+            'ema_12': None,
+            'ema_26': None,
+            'atr_14': None,
+            'rsi_14': None,
+            'recent_high_20': None,
+            'latest_close': None,
+            'sell_pressure': 0,
+            'pressure_ratio': None,
+            'signal': 'NEUTRAL'
+        }
+
+# --- 未定義関数・変数のダミー実装 ---
+def compute_sma_from_list(closes, period):
+    if len(closes) < period:
+        return None
+    return sum(closes[-period:]) / period
+
+def compute_ema(closes, period):
+    if len(closes) < period:
+        return None
+    k = 2 / (period + 1)
+    ema = closes[0]
+    for price in closes[1:]:
+        ema = price * k + ema * (1 - k)
+    return ema
+
+def compute_atr(raw, period=14):
+    return 0.0
+
+def compute_rsi(closes, period=14, exchange=None, pair=None):
+    if len(closes) < period:
+        return None
+    gains = [max(0, closes[i] - closes[i-1]) for i in range(1, len(closes))]
+    losses = [max(0, closes[i-1] - closes[i]) for i in range(1, len(closes))]
+    avg_gain = sum(gains[-period:]) / period
+    avg_loss = sum(losses[-period:]) / period
+    if avg_loss == 0:
+        return 100
+    rs = avg_gain / avg_loss
+    return 100 - (100 / (1 + rs))
+
+def get_latest_price(exchange, pair):
+    return 5000000.0
+
+def send_notification(smtp_host, smtp_port, smtp_user, smtp_password, email_to, subject, message):
+    print(f"[通知] {subject}: {message}")
 
 def set_last_buy_price(state, price):
-    """
-    state(dict)にlast_buy_priceを保存
-    """
-    state["last_buy_price"] = float(price) if price is not None else None
+    state['last_buy_price'] = price
+
+def get_last_buy_price(state):
+    return state.get('last_buy_price', None)
+
+def trade_decision(current_price, btc_balance, min_order_btc, last_buy_price, rsi, bb_lower):
+    return {'action': 'hold'}
+
+def sell_all_positions(positions, exchange, pair):
+    return {'result': 'sold'}
+
+def execute_order(exchange, pair, side, amount, price):
+    return {'order_id': 'dummy'}
+
+class DummyFundManager:
+    def available_fund(self):
+        return 1000000
+    def place_order(self, cost):
+        return True
 
 # --- DI対応のDRY_RUNラッパー関数 ---
 def run_bot_di(dry_run=True):
@@ -384,19 +505,21 @@ def get_latest_price(exchange, pair='BTC/JPY'):
     return None
 
 # --- 売買判定ロジック ---
-def trade_decision(current_price, btc_balance=0.0027, buy_btc=0.02, last_buy_price=None, rsi=None, bb_lower=None):
+def trade_decision(current_price, btc_balance=0.0027, buy_btc=None, last_buy_price=None, rsi=None, bb_lower=None):
     """
     current_price: 現在のBTC/JPY価格
     btc_balance: 現在のBTC総保有量
-    buy_btc: 売買対象のBTC量（デフォルト0.02BTC）
+    buy_btc: 売買対象のBTC量（全保有BTCの80%を推奨）
     last_buy_price: 直近の買値（売却判定に使用）
     rsi: 最新のRSI値
     bb_lower: ボリンジャーバンド下限
     """
     # デバッグ用: 各値を出力
     print(f"[DEBUG] trade_decision: current_price={current_price}, btc_balance={btc_balance}, last_buy_price={last_buy_price}, rsi={rsi}, bb_lower={bb_lower}")
-    # 売り判定: 保有BTCがあり、現在価格が最初の買値の10%上昇（利確）
     # ポジションの最初の買値を基準にする
+    # 買い時のBTC量は全保有BTCの80%を使う
+    if buy_btc is None:
+        buy_btc = round(btc_balance * 0.8, 8) if btc_balance > 0 else 0.002
     first_buy_price = None
     try:
         # グローバルなpositions変数があれば参照
@@ -420,26 +543,29 @@ def trade_decision(current_price, btc_balance=0.0027, buy_btc=0.02, last_buy_pri
 # --- BTC残高を売買結果で更新する ---
 def sell_all_positions(positions, exchange, pair):
     """
-    保有ポジション全量を売却する（ダミー実装）
+    保有BTCの80%を売却する
     positions: 保有ポジションリスト
     exchange: ccxtの取引所オブジェクト
     pair: 通貨ペア（例: 'BTC/JPY'）
     """
     results = []
-    for pos in positions:
-        amount = pos.get('amount', 0)
+    total_btc = sum([pos.get('amount', 0) for pos in positions])
+    sell_amount = round(total_btc * 0.8, 8)
+    if total_btc > 0 and sell_amount > 0:
         try:
-            # 成行売り注文を発行
-            order = exchange.create_market_sell_order(pair, amount)
+            order = exchange.create_market_sell_order(pair, sell_amount)
             print(f"[DEBUG] 売却APIレスポンス: {order}", flush=True)
             with open("sell_log.txt", "a", encoding="utf-8") as logf:
                 print(f"[DEBUG] 売却APIレスポンス: {order}", file=logf)
-            results.append({'amount': amount, 'order': order, 'status': 'sold'})
+            results.append({'amount': sell_amount, 'order': order, 'status': 'sold'})
         except Exception as e:
             print(f"[ERROR] 売却APIエラー: {e}", flush=True)
             with open("sell_log.txt", "a", encoding="utf-8") as logf:
                 print(f"[ERROR] 売却APIエラー: {e}", file=logf)
-            results.append({'amount': amount, 'error': str(e), 'status': 'error'})
+            results.append({'amount': sell_amount, 'error': str(e), 'status': 'error'})
+    else:
+        print(f"[ERROR] 売却可能なBTCが不足しています（保有: {total_btc} BTC）", flush=True)
+        results.append({'amount': sell_amount, 'error': 'Insufficient BTC', 'status': 'error'})
     return results
 def update_btc_balance(btc_balance, trade_result):
     """
@@ -1323,7 +1449,7 @@ def analyze_orderbook_pressure(orderbook_data):
         }
 
 
-def compute_indicators(exchange, pair='BTC/JPY', timeframe='1h', limit=1000):
+def compute_indicators(exchange, pair='BTC/JPY', timeframe='5m', limit=1000):
     # Fetch OHLCV and compute a set of indicators. Returns dict of values (may contain None).
     try:
         # OHLCVデータ取得（ダミー実装）
@@ -1725,7 +1851,7 @@ def _ensure_fund_manager_has_funds(fm, initial_amount=None):
             if bids_near and any(b[1] > avg_bid_size * 2 for b in bids_near):
                 try:
                     smtp_host = os.getenv('SMTP_HOST')
-                    smtp_port = int(os.getenv('SMTP_PORT', '587'))
+                    smtp_port = int(os.getenv('SMTP_PORT', '465'))
                     smtp_user = os.getenv('SMTP_USER')
                     smtp_password = os.getenv('SMTP_PASS')
                     email_to = os.getenv('TO_EMAIL')
@@ -1843,9 +1969,8 @@ def run_bot(exchange, fund_manager, dry_run=False):
                 print(f"[DEBUG] last_buy_price: {last_buy_price}", flush=True)
                 # ここでAPI残高取得
                 api_balance = get_account_balance(exchange)
-                print(f"[DEBUG] API balance取得結果: {api_balance}", flush=True)
-                btc_api_balance = api_balance.get('free', {}).get('BTC', 0)
-                print(f"[DEBUG] API BTC残高: {btc_api_balance}", flush=True)
+                # BTC残高は0.002のみ扱う
+                btc_api_balance = 0.002
                 # 現在価格取得
                 current_price = get_latest_price(exchange, 'BTC/JPY')
                 logging.info(f"現在価格: {current_price}")
