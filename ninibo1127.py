@@ -61,7 +61,6 @@ def run_bot(exchange, fund_manager, dry_run=False):
                 bb_upper = None
 
             # --- RSI反発ロジック ---
-            buy_board = [bid for bid in bids if (current_price * 0.997 <= bid[0] <= current_price * 0.999) and bid[1] > avg_bid_size * 2]
             rsi_buy_signal = False
             prev_rsi = None
             latest_rsi = None
@@ -70,7 +69,7 @@ def run_bot(exchange, fund_manager, dry_run=False):
                 latest_rsi = rsi_list[-1]
                 if 25 <= prev_rsi <= 28 and latest_rsi > prev_rsi:
                     rsi_buy_signal = True
-            if rsi_buy_signal and (bb_lower is not None and current_price <= bb_lower) and buy_board:
+            if rsi_buy_signal:
                 try:
                     smtp_host = os.getenv('SMTP_HOST')
                     smtp_port = int(os.getenv('SMTP_PORT', '465'))
@@ -79,16 +78,15 @@ def run_bot(exchange, fund_manager, dry_run=False):
                     email_to = os.getenv('TO_EMAIL')
                     if smtp_host and email_to:
                         now = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-                        subject = f"【買いシグナル】RSI反発+BB-2σ下限+厚い買い板 {now}"
-                        message = f"【板情報】\n時刻: {now}\n現在価格: {current_price} 円\nRSI(前): {prev_rsi}\nRSI(最新): {latest_rsi}\nBB下限: {bb_lower}\n厚い買い板: {buy_board}\n条件揃いで買い推奨。"
+                        subject = f"【買いシグナル】RSI反発+BB-2σ下限 {now}"
+                        message = f"【シグナル】\n時刻: {now}\n現在価格: {current_price} 円\nRSI(前): {prev_rsi}\nRSI(最新): {latest_rsi}\n条件揃いで買い推奨。"
                         send_notification(smtp_host, smtp_port, smtp_user, smtp_password, email_to, subject, message)
                 except Exception as e:
                     print(f"⚠️ 買いシグナルメール送信エラー: {e}")
 
             # --- 5分足トレーリングストップ売り判定 ---
-            sell_board = [ask for ask in asks if (current_price * 1.001 <= ask[0] <= current_price * 1.003) and ask[1] > avg_ask_size * 2]
             trailing_start_pct = 0.05  # +5%でトレーリング開始
-            trailing_width_pct = 0.04  # 直近高値から-4%で売り
+            trailing_width_pct = 0.05  # 直近高値から-5%で売り
             stop_loss_pct = -0.06      # -6%で損切り
             entry_price = None
             if positions and len(positions) > 0:
@@ -128,16 +126,12 @@ def run_bot(exchange, fund_manager, dry_run=False):
                             subject = f"【売りシグナル】損切り発動 {now}"
                             message = f"【損切り】\n時刻: {now}\n現在価格: {current_price} 円\n買値: {entry_price}\n{stop_loss_reason}"
                         else:
-                            subject = f"【売りシグナル】RSI65-75+BB+2σ上限+厚い売り板 {now}"
-                            message = f"【板情報】\n時刻: {now}\n現在価格: {current_price} 円\nRSI: {rsi}\nBB上限: {bb_upper}\n厚い売り板: {sell_board}\n条件揃いで売り推奨。"
+                            subject = f"【売りシグナル】RSI65-75+BB+2σ上限 {now}"
+                            message = f"【シグナル】\n時刻: {now}\n現在価格: {current_price} 円\nRSI: {rsi}\nBB上限: {bb_upper}\n条件揃いで売り推奨。"
                         send_notification(smtp_host, smtp_port, smtp_user, smtp_password, email_to, subject, message)
                 except Exception as e:
                     print(f"⚠️ 売りシグナルメール送信エラー: {e}")
-            # 売り板が厚い場合（平均の2倍以上）
-            custom_take_profit = None
-            if asks_near and any(a[1] > avg_ask_size * 2 for a in asks_near):
-                thick_ask_price = max([a[0] for a in asks_near if a[1] > avg_ask_size * 2])
-                custom_take_profit = thick_ask_price
+            # 厚い板ロジック削除
             # 板が薄い場合（買い板・売り板とも平均の半分以下）
             nampin_interval = 0.10
             if (avg_bid_size < 0.5 * (sum([b[1] for b in bids]) / len(bids) if bids else 1)) and (avg_ask_size < 0.5 * (sum([a[1] for a in asks]) / len(asks) if asks else 1)):
@@ -223,15 +217,13 @@ def run_bot(exchange, fund_manager, dry_run=False):
                 except Exception as e:
                     print(f"[ERROR] 売却処理例外: {e}", flush=True)
             elif td.get('action') == 'buy':
-                if rsi is not None and rsi <= 30:
-                    reason = f"RSIが30以下（現在値: {rsi}）"
-                elif bb_lower is not None and current_price <= bb_lower:
-                    reason = f"価格がBB下限（{bb_lower}）以下"
+                if rsi is not None and rsi <= 35:
+                    reason = f"RSIが35以下（現在値: {rsi}）"
                 else:
                     reason = "買い条件成立"
                 if smtp_host and email_to:
                     subject = f"【買いシグナル】BTC購入推奨 {now}"
-                    message = f"【買いシグナル】\n時刻: {now}\n現在価格: {current_price} 円\nRSI: {rsi}\nBB下限: {bb_lower}\n根拠: {reason}"
+                    message = f"【買いシグナル】\n時刻: {now}\n現在価格: {current_price} 円\nRSI: {rsi}\n根拠: {reason}"
                     send_notification(smtp_host, smtp_port, smtp_user, smtp_password, email_to, subject, message)
             # --- ポジションが空のときだけ買い判定 ---
             if not positions:
@@ -532,10 +524,9 @@ def trade_decision(current_price, btc_balance=0.0027, buy_btc=None, last_buy_pri
     # fallback: last_buy_price
     if first_buy_price is None:
         first_buy_price = last_buy_price
-    if btc_balance > 0 and first_buy_price is not None and current_price > first_buy_price * 1.10:
-        return {'action': 'sell', 'amount': btc_balance, 'price': current_price, 'sell_condition': True}
-    # 買い判定: BTC未保有、RSI<=30 または BB下限タッチ
-    if btc_balance == 0 and ((rsi is not None and rsi <= 30) or (bb_lower is not None and current_price <= bb_lower)):
+    # 利確（+10%）条件を削除。売りはトレーリングストップ・損切りのみ。
+    # 買い判定: BTC未保有、RSI<=35
+    if btc_balance == 0 and (rsi is not None and rsi <= 35):
         return {'action': 'buy', 'amount': buy_btc, 'price': current_price, 'buy_condition': True}
     # 何もしない
     return {'action': 'hold', 'amount': 0.0, 'price': current_price, 'buy_condition': False, 'sell_condition': False}
@@ -1659,41 +1650,16 @@ def generate_signals(df):
     signal = None
     message = None
 
-    # --- RSI単独による売買判定（30以下で買い、70以上で売り）---
-    if latest_data['rsi'] <= 30:
+    # --- RSI単独による売買判定（35以下で買い、70以上で売り）---
+    if latest_data['rsi'] <= 35:
         signal = 'buy_entry'
-        message = f"✅ RSI買い注文: RSI={latest_data['rsi']:.2f} (30以下)"
+        message = f"✅ RSI買い注文: RSI={latest_data['rsi']:.2f} (35以下)"
         return signal, message
     elif latest_data['rsi'] >= 70:
         signal = 'sell_all'
         message = f"❌ RSI売り注文: RSI={latest_data['rsi']:.2f} (70以上)"
         return signal, message
 
-    # --- RSI＋ボリンジャーバンドによる売買判定 ---
-    rsi_series = df['rsi'].values
-    period = 14
-    num_std = 2
-    if len(rsi_series) >= period:
-        import numpy as np
-        sma = np.convolve(rsi_series, np.ones(period)/period, mode='valid')
-        std = np.array([np.std(rsi_series[i-period:i]) if i >= period else np.nan for i in range(1, len(rsi_series)+1)])
-        upper_band = sma + num_std * std[period-1:]
-        lower_band = sma - num_std * std[period-1:]
-
-        rsi_now = rsi_series[-1]
-        # 最新のバンド値
-        upper = upper_band[-1]
-        lower = lower_band[-1]
-        # 下抜けで買い
-        if rsi_now < lower:
-            signal = 'buy_entry'
-            message = f"✅ RSIボリンジャー下抜け買い: RSI={rsi_now:.2f} < 下バンド{lower:.2f}"
-            return signal, message
-        # 上抜けで売り
-        elif rsi_now > upper:
-            signal = 'sell_all'
-            message = f"❌ RSIボリンジャー上抜け売り: RSI={rsi_now:.2f} > 上バンド{upper:.2f}"
-            return signal, message
 
     # 従来のトレンドフィルターも残す
     is_uptrend = latest_data['mid_mavg'] > latest_data['long_mavg']
@@ -1842,37 +1808,6 @@ def _ensure_fund_manager_has_funds(fm, initial_amount=None):
             bids = orderbook.get('bids', [])
             asks = orderbook.get('asks', [])
             current_price = get_latest_price(exchange, 'BTC/JPY')
-            # 厚い買い板・売り板判定
-            bids_near = [bid for bid in bids if abs(bid[0] - current_price) < current_price * 0.01]
-            asks_near = [ask for ask in asks if abs(ask[0] - current_price) < current_price * 0.01]
-            avg_bid_size = sum([b[1] for b in bids_near]) / len(bids_near) if bids_near else 0
-            avg_ask_size = sum([a[1] for a in asks_near]) / len(asks_near) if asks_near else 0
-            # 買い板が厚い場合（平均の2倍以上）
-            if bids_near and any(b[1] > avg_bid_size * 2 for b in bids_near):
-                try:
-                    smtp_host = os.getenv('SMTP_HOST')
-                    smtp_port = int(os.getenv('SMTP_PORT', '465'))
-                    smtp_user = os.getenv('SMTP_USER')
-                    smtp_password = os.getenv('SMTP_PASS')
-                    email_to = os.getenv('TO_EMAIL')
-                    if smtp_host and email_to:
-                        now = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-                        subject = f"厚い買い板付近:資金投入推奨 {now}"
-                        message = f"【板情報】\n時刻: {now}\n現在価格: {current_price} 円\n厚い買い板付近です。資金投入を推奨します。"
-                        send_notification(smtp_host, smtp_port, smtp_user, smtp_password, email_to, subject, message)
-                except Exception as e:
-                    print(f"⚠️ 板資金投入通知メール送信エラー: {e}")
-            # 売り板が厚い場合（平均の2倍以上）
-            if asks_near and any(a[1] > avg_ask_size * 2 for a in asks_near):
-                thick_ask_price = max([a[0] for a in asks_near if a[1] > avg_ask_size * 2])
-                custom_take_profit = thick_ask_price
-            else:
-                custom_take_profit = None
-            # 板が薄い場合（買い板・売り板とも平均の半分以下）
-            if (avg_bid_size < 0.5 * (sum([b[1] for b in bids]) / len(bids) if bids else 1)) and (avg_ask_size < 0.5 * (sum([a[1] for a in asks]) / len(asks) if asks else 1)):
-                nampin_interval = 0.20
-            else:
-                nampin_interval = 0.10
         except Exception as e:
             print(f"⚠️ 板情報取得・判定エラー: {e}")
             custom_take_profit = None
@@ -1885,37 +1820,6 @@ def run_bot(exchange, fund_manager, dry_run=False):
         bids = orderbook.get('bids', [])
         asks = orderbook.get('asks', [])
         current_price = get_latest_price(exchange, 'BTC/JPY')
-        # 厚い買い板・売り板判定
-        bids_near = [bid for bid in bids if abs(bid[0] - current_price) < current_price * 0.01]
-        asks_near = [ask for ask in asks if abs(ask[0] - current_price) < current_price * 0.01]
-        avg_bid_size = sum([b[1] for b in bids_near]) / len(bids_near) if bids_near else 0
-        avg_ask_size = sum([a[1] for a in asks_near]) / len(asks_near) if asks_near else 0
-        # 買い板が厚い場合（平均の2倍以上）
-        if bids_near and any(b[1] > avg_bid_size * 2 for b in bids_near):
-            try:
-                smtp_host = os.getenv('SMTP_HOST')
-                smtp_port = int(os.getenv('SMTP_PORT', '587'))
-                smtp_user = os.getenv('SMTP_USER')
-                smtp_password = os.getenv('SMTP_PASS')
-                email_to = os.getenv('TO_EMAIL')
-                if smtp_host and email_to:
-                    now = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-                    subject = f"厚い買い板付近:資金投入推奨 {now}"
-                    message = f"【板情報】\n時刻: {now}\n現在価格: {current_price} 円\n厚い買い板付近です。資金投入を推奨します。"
-                    send_notification(smtp_host, smtp_port, smtp_user, smtp_password, email_to, subject, message)
-            except Exception as e:
-                print(f"⚠️ 板資金投入通知メール送信エラー: {e}")
-        # 売り板が厚い場合（平均の2倍以上）
-        if asks_near and any(a[1] > avg_ask_size * 2 for a in asks_near):
-            thick_ask_price = max([a[0] for a in asks_near if a[1] > avg_ask_size * 2])
-            custom_take_profit = thick_ask_price
-        else:
-            custom_take_profit = None
-        # 板が薄い場合（買い板・売り板とも平均の半分以下）
-        if (avg_bid_size < 0.5 * (sum([b[1] for b in bids]) / len(bids) if bids else 1)) and (avg_ask_size < 0.5 * (sum([a[1] for a in asks]) / len(asks) if asks else 1)):
-            nampin_interval = 0.20
-        else:
-            nampin_interval = 0.10
     except Exception as e:
         print(f"⚠️ 板情報取得・判定エラー: {e}")
         custom_take_profit = None
