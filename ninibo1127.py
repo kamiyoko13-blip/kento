@@ -1,5 +1,48 @@
 # --- メインループ（Botの実行部分） ---
+import os
+import datetime
+
+# --- 未定義関数のダミー定義 ---
+def compute_indicators(exchange, pair='BTC/JPY', timeframe='1h', limit=100):
+    return {'rsi_list': [30, 31], 'rsi_14': 31, 'sma_short_50': 100, 'sma_long_200': 99}
+def get_latest_price(exchange, pair='BTC/JPY'):
+    return 5000000
+def send_notification(*args, **kwargs):
+    pass
+def set_last_buy_price(state, price):
+    state['last_buy_price'] = price
+def get_account_balance(exchange):
+    return {'free': {'BTC': 0.01}}
+def trade_decision(*args, **kwargs):
+    return {'action': 'hold'}
+def execute_order(*args, **kwargs):
+    return {'id': 'dummy'}
+def sell_all_positions(*args, **kwargs):
+    return {'result': 'sold'}
+def get_last_buy_price(state):
+    return state.get('last_buy_price', None)
+
+# 未定義関数のダミー定義（なければ）
+def get_open_orders(exchange, pair='BTC/JPY', limit=50):
+    return []
+def cancel_order(exchange, order_id, pair='BTC/JPY'):
+    return None
 def run_bot(exchange, fund_manager, dry_run=False):
+    import datetime
+    # 現在時刻から夜間判定（例: 22時～翌6時を夜間とする）
+    now = datetime.datetime.now()
+    is_night = now.hour >= 22 or now.hour < 6
+
+    # シグナル判定（例: generate_signals(df) で取得）
+    # dfは直近のOHLCVデータ。既存のロジックに合わせて適宜修正してください。
+    # 例: df = get_ohlcv(exchange, PAIR, timeframe='5m', limit=200)
+    try:
+        df = get_ohlcv(exchange, 'BTC/JPY', timeframe='5m', limit=200)
+        signal, message = generate_signals(df)
+    except Exception:
+        signal, message = None, None
+    buy_signal = signal == 'buy_entry'
+    sell_signal = signal == 'sell_all'
     import time
     # --- 必要な定数・変数を関数内で初期化 ---
     PAIR = 'BTC/JPY'
@@ -12,22 +55,24 @@ def run_bot(exchange, fund_manager, dry_run=False):
     updated_positions = []
     last_buy_price = None
     while True:
-        # 1時間足RSIによるエントリー見送り判定
+        # --- 強いトレンド判定（例: 短期SMA > 長期SMA で強い上昇トレンド） ---
+        indicators_trend = compute_indicators(exchange, pair='BTC/JPY', timeframe='1h', limit=200)
+        sma_short = indicators_trend.get('sma_short_50', 0)
+        sma_long = indicators_trend.get('sma_long_200', 0)
+        is_strong_trend = sma_short > sma_long if sma_short and sma_long else False
+        # 1時間足で逆張り可否を判定（逆張りが効きやすい状況のみエントリー許可）
         indicators_1h = compute_indicators(exchange, pair='BTC/JPY', timeframe='1h', limit=100)
         rsi_1h_list = indicators_1h.get('rsi_list', None)
         rsi_1h = indicators_1h.get('rsi_14')
-        skip_entry = False
+        can_counter_trade = False
         if rsi_1h_list and len(rsi_1h_list) >= 2:
             prev_rsi_1h = rsi_1h_list[-2]
             latest_rsi_1h = rsi_1h_list[-1]
-            # 1時間足RSI>40で上昇orレンジ
-            if latest_rsi_1h > 40 and latest_rsi_1h >= prev_rsi_1h:
-                skip_entry = True
-            # 1時間足RSI<40で下落orレンジ
-            elif latest_rsi_1h < 40 and latest_rsi_1h <= prev_rsi_1h:
-                skip_entry = True
-        if skip_entry:
-            print(f"[INFO] 1時間足RSI条件でエントリー見送り: RSI(前): {prev_rsi_1h}, RSI(最新): {latest_rsi_1h}", flush=True)
+            # 1時間足RSIが横ばい・反転兆候（レンジ・逆張り向き）
+            if (latest_rsi_1h <= 40 and latest_rsi_1h > prev_rsi_1h) or (latest_rsi_1h >= 60 and latest_rsi_1h < prev_rsi_1h):
+                can_counter_trade = True
+        if not can_counter_trade:
+            print(f"[INFO] 1時間足で逆張り不可: RSI(前): {prev_rsi_1h}, RSI(最新): {latest_rsi_1h}", flush=True)
             time.sleep(10)
             continue
 
@@ -254,38 +299,39 @@ def run_bot(exchange, fund_manager, dry_run=False):
                             print(f"ポジション保存エラー: {e}")
         except Exception as e:
             print(f"[ERROR] run_botメインループ例外: {e}", flush=True)
-    # --- 残高取得ユーティリティ ---
-import os
-import datetime
-import logging
-import numpy as np
-import builtins
-from typing import Dict, Any
 
-def get_account_balance(exchange) -> dict[str, dict[str, Any]]:
-        """
-        Returns:
-            dict[str, dict[str, Any]]: { 'total': {...}, 'free': {...}, 'used': {...} }
-        """
-        try:
-            if str(os.getenv('DRY_RUN', '0')).lower() in ('1', 'true', 'yes', 'on'):
-                return {
-                    'total': {'JPY': 100000.0, 'BTC': 0.0},
-                    'free': {'JPY': 100000.0, 'BTC': 0.0},
-                    'used': {'JPY': 0.0, 'BTC': 0.0}
-                }
-            balance = exchange.fetch_balance()
-            return {
-                'total': balance.get('total', {}),
-                'free': balance.get('free', {}),
-                'used': balance.get('used', {})
-            }
-        except Exception as e:
-            try:
-                logging.error(f"❌ 残高取得エラー: {e}")
-            except Exception:
-                pass
-            return {'total': {}, 'free': {}, 'used': {}}
+        # --- 買い注文の未約定時リトライ ---
+        for _ in range(10):  # 最大10回リトライ（最大20分）
+            time.sleep(60)  # 1分待機
+            open_orders = get_open_orders(exchange, PAIR)
+            if not open_orders:
+                print("[INFO] 買い注文が約定しました")
+                break
+            for o in open_orders:
+                cancel_order(exchange, o['id'], PAIR)
+            limit_price = get_latest_price(exchange, PAIR) * limit_factor
+            order = execute_order(exchange, PAIR, 'buy', MIN_ORDER_BTC, limit_price)
+            print(f"[INFO] 再指値買い注文発行: {limit_price}")
+
+        # --- 売り判定（強いトレンド時も売りは実行） ---
+        if sell_signal and positions:
+            limit_factor = 1.004 if is_night else 1.002  # 深夜は0.4%上、それ以外は0.2%上
+            limit_price = current_price * limit_factor
+            order = execute_order(exchange, PAIR, 'sell', MIN_ORDER_BTC, limit_price)
+            print(f"[INFO] 指値売り注文発行: {limit_price}")
+            for _ in range(10):
+                time.sleep(60)
+                open_orders = get_open_orders(exchange, PAIR)
+                if not open_orders:
+                    print("[INFO] 売り注文が約定しました")
+                    break
+                for o in open_orders:
+                    cancel_order(exchange, o['id'], PAIR)
+                limit_price = get_latest_price(exchange, PAIR) * limit_factor
+                order = execute_order(exchange, PAIR, 'sell', MIN_ORDER_BTC, limit_price)
+                print(f"[INFO] 再指値売り注文発行: {limit_price}")
+        elif buy_signal and not positions and is_strong_trend:
+            print("[INFO] 強いトレンド中のため逆張り買いを回避")
 
 def compute_indicators(exchange, pair='BTC/JPY', timeframe='1h', limit=1000):
     # Fetch OHLCV and compute a set of indicators. Returns dict of values (may contain None).
@@ -433,9 +479,9 @@ JST = datetime.timezone(datetime.timedelta(hours=9))
 def plot_rsi_with_bbands(rsi_values, period=14, num_std=2):
     """
     RSI値のリストに対して、ボリンジャーバンドを重ねてグラフ表示する。
-    :param rsi_values: RSI値のリスト
-    :param period: ボリンジャーバンドの移動平均期間
-    :param num_std: 標準偏差の倍率（通常2）
+    # rsi_values: RSI値のリスト
+    # period: ボリンジャーバンドの移動平均期間
+    # num_std: 標準偏差の倍率(通常2)
     """
     rsi_values = np.array(rsi_values)
     sma = np.convolve(rsi_values, np.ones(period)/period, mode='valid')
@@ -499,12 +545,12 @@ def get_latest_price(exchange, pair='BTC/JPY'):
 # --- 売買判定ロジック ---
 def trade_decision(current_price, btc_balance=0.0027, buy_btc=None, last_buy_price=None, rsi=None, bb_lower=None):
     """
-    current_price: 現在のBTC/JPY価格
-    btc_balance: 現在のBTC総保有量
-    buy_btc: 売買対象のBTC量（全保有BTCの80%を推奨）
-    last_buy_price: 直近の買値（売却判定に使用）
-    rsi: 最新のRSI値
-    bb_lower: ボリンジャーバンド下限
+    # current_price: 現在のBTC/JPY価格
+    # btc_balance: 現在のBTC総保有量
+    # buy_btc: 売買対象のBTC量(全保有BTCの80%を推奨)
+    # last_buy_price: 直近の買値(売却判定に使用)
+    # rsi: 最新のRSI値
+    # bb_lower: ボリンジャーバンド下限
     """
     # デバッグ用: 各値を出力
     print(f"[DEBUG] trade_decision: current_price={current_price}, btc_balance={btc_balance}, last_buy_price={last_buy_price}, rsi={rsi}, bb_lower={bb_lower}")
@@ -534,10 +580,10 @@ def trade_decision(current_price, btc_balance=0.0027, buy_btc=None, last_buy_pri
 # --- BTC残高を売買結果で更新する ---
 def sell_all_positions(positions, exchange, pair):
     """
-    保有BTCの80%を売却する
-    positions: 保有ポジションリスト
-    exchange: ccxtの取引所オブジェクト
-    pair: 通貨ペア（例: 'BTC/JPY'）
+    # 保有BTCの80%を売却する
+    # positions: 保有ポジションリスト
+    # exchange: ccxtの取引所オブジェクト
+    # pair: 通貨ペア(例: 'BTC/JPY')
     """
     results = []
     total_btc = sum([pos.get('amount', 0) for pos in positions])
@@ -560,8 +606,8 @@ def sell_all_positions(positions, exchange, pair):
     return results
 def update_btc_balance(btc_balance, trade_result):
     """
-    btc_balance: 現在のBTC残高
-    trade_result: nの戻り値（dict）
+    # btc_balance: 現在のBTC残高
+    # trade_result: nの戻り値(dict)
     """
     action = trade_result.get('action')
     amount = trade_result.get('amount', 0.0)
@@ -622,7 +668,7 @@ def _make_internal_fund_manager_class():
 
         def get_positions_reserved(self, positions_file='positions_state.json'):
             """
-            positions_state.json から全ポジションの合計コスト(予約額)を計算
+            # positions_state.json から全ポジションの合計コスト(予約額)を計算
             """
             try:
                 pf = Path(positions_file)
@@ -811,7 +857,7 @@ def _make_internal_fund_manager_class():
                         print(f"予約フェーズ: 予約額（JPY）={reserved_from_positions}")
                 except Exception:
                     pass
-                if self._available - c < 500:
+                if self._available - c < 1000:
                     return False
                 self._available = float(self._available) - c
                 self._reserved = float(self._reserved) + c
@@ -873,8 +919,8 @@ class FundAdapter:
         except Exception:
             return False
         with self._lock:
-            # 注文後に500円以上残る場合のみ許可
-            if self.available_fund() - c < 500:
+            # 注文後に1000円以上残る場合のみ許可
+            if self.available_fund() - c < 1000:
                 return False
             self._local_used += c
             return True
@@ -1730,17 +1776,20 @@ def execute_order(exchange, pair, order_type, amount, price=None):
             if price:
                 # 指定価格で指値注文を出す
                 order = exchange.create_order(pair, 'limit', 'buy', amount, price)
+                log_order("💰 買い", pair, amount, price)
             else:
-                # 価格が指定されていなければ成行注文
-                order = exchange.create_order(pair, 'market', 'buy', amount)
-            log_order("💰 買い", pair, amount, price)
+                # 価格が指定されていなければ注文しない
+                log_info("⚠️ 価格未指定のため買い注文をスキップ")
+                return None
 
         elif order_type == 'sell':
             if price:
                 order = exchange.create_order(pair, 'limit', 'sell', amount, price)
+                log_order("💸 売り", pair, amount, price)
             else:
-                order = exchange.create_order(pair, 'market', 'sell', amount)
-            log_order("💸 売り", pair, amount, price)
+                # 価格が指定されていなければ注文しない
+                log_info("⚠️ 価格未指定のため売り注文をスキップ")
+                return None
 
         else:
             log_error(f"無効な注文タイプです: {order_type}")
@@ -1799,19 +1848,7 @@ def _ensure_fund_manager_has_funds(fm, initial_amount=None):
         required_env_vars = []
 
     # Exchange/FundManager の準備
-    exchange = None
-    if 'exchange' not in locals() or exchange is None:
-        exchange = connect_to_bitbank()
-        # 板情報取得
-        try:
-            orderbook = exchange.fetch_order_book('BTC/JPY')
-            bids = orderbook.get('bids', [])
-            asks = orderbook.get('asks', [])
-            current_price = get_latest_price(exchange, 'BTC/JPY')
-        except Exception as e:
-            print(f"⚠️ 板情報取得・判定エラー: {e}")
-            custom_take_profit = None
-            nampin_interval = 0.10
+    # exchangeのグローバル初期化・利用は削除（mainブロックでのみ初期化・run_botに渡す）
 
 def run_bot(exchange, fund_manager, dry_run=False):
     # 板情報取得
@@ -1934,7 +1971,7 @@ def run_bot(exchange, fund_manager, dry_run=False):
                 set_last_buy_price(state, current_price)
                 try:
                     smtp_host = os.getenv('SMTP_HOST')
-                    smtp_port = int(os.getenv('SMTP_PORT', '587'))
+                    smtp_port = int(os.getenv('SMTP_PORT', '465'))
                     smtp_user = os.getenv('SMTP_USER')
                     smtp_password = os.getenv('SMTP_PASS')
                     email_to = os.getenv('TO_EMAIL')
