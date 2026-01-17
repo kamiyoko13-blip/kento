@@ -1,3 +1,16 @@
+class DummyExchange:
+    def fetch_ohlcv(self, pair, timeframe='1h', limit=100):
+        # 1時間足なら最低15本以上のダミーデータを返す
+        import time
+        now = int(time.time() * 1000)
+        if timeframe == '1h':
+            # 1時間ごとに価格が少しずつ変動するダミーデータ
+            return [[now - 3600000 * i, 5000000 + i * 1000, 5001000 + i * 1000, 4999000 + i * 1000, 5000000 + i * 1000, 0.1] for i in reversed(range(max(15, limit)))]
+        elif timeframe == '5m':
+            return [[now - 300000 * i, 5000000 + i * 100, 5000500 + i * 100, 4999500 + i * 100, 5000000 + i * 100, 0.05] for i in reversed(range(max(20, limit)))]
+        else:
+            return [[now - 3600000 * i, 5000000, 5001000, 4999000, 5000000, 0.1] for i in reversed(range(max(15, limit)))]
+
 # --- メインループ（Botの実行部分） ---
 import os
 import datetime
@@ -54,6 +67,9 @@ def run_bot(exchange, fund_manager, dry_run=False):
     positions = []
     updated_positions = []
     last_buy_price = None
+    # ダミー環境用: exchangeがNoneならDummyExchangeを使う
+    if exchange is None:
+        exchange = DummyExchange()
     while True:
         # --- 強いトレンド判定（例: 短期SMA > 長期SMA で強い上昇トレンド） ---
         indicators_trend = compute_indicators(exchange, pair='BTC/JPY', timeframe='1h', limit=200)
@@ -65,9 +81,20 @@ def run_bot(exchange, fund_manager, dry_run=False):
         rsi_1h_list = indicators_1h.get('rsi_list', None)
         rsi_1h = indicators_1h.get('rsi_14')
         can_counter_trade = False
-        if rsi_1h_list and len(rsi_1h_list) >= 2:
-            prev_rsi_1h = rsi_1h_list[-2]
-            latest_rsi_1h = rsi_1h_list[-1]
+        prev_rsi_1h = None
+        latest_rsi_1h = None
+        if not rsi_1h_list:
+            print(f"[WARN] 1時間足のRSIリストが取得できません: {rsi_1h_list}", flush=True)
+            time.sleep(10)
+            continue
+        if len(rsi_1h_list) < 2:
+            print(f"[WARN] 1時間足のRSIリスト要素不足: {rsi_1h_list}", flush=True)
+            time.sleep(10)
+            continue
+        prev_rsi_1h = rsi_1h_list[-2]
+        latest_rsi_1h = rsi_1h_list[-1]
+        # Noneが混じる場合は逆張り判定をスキップ
+        if prev_rsi_1h is not None and latest_rsi_1h is not None:
             # 1時間足RSIが横ばい・反転兆候（レンジ・逆張り向き）
             if (latest_rsi_1h <= 40 and latest_rsi_1h > prev_rsi_1h) or (latest_rsi_1h >= 60 and latest_rsi_1h < prev_rsi_1h):
                 can_counter_trade = True
@@ -341,6 +368,7 @@ def compute_indicators(exchange, pair='BTC/JPY', timeframe='1h', limit=1000):
         indicators = {}
         # prepare lists
         closes = [float(r[4]) for r in raw if r and len(r) >= 5 and r[4] is not None]
+        print(f"[DEBUG] {timeframe}足closes本数: {len(closes)} 内容: {closes}")
         highs = [float(r[2]) for r in raw if r and len(r) >= 3 and r[2] is not None]
         lows = [float(r[3]) for r in raw if r and len(r) >= 4 and r[3] is not None]
 
@@ -352,7 +380,14 @@ def compute_indicators(exchange, pair='BTC/JPY', timeframe='1h', limit=1000):
         indicators['atr_14'] = compute_atr(raw, period=14)
         # RSIリスト（反発判定用）
         if len(closes) >= 14:
-            rsi_list = [compute_rsi(closes[:i], period=14, exchange=exchange, pair=pair) for i in range(14, len(closes)+1)]
+            # すべての期間でRSI値を計算（pandas風）
+            rsi_list = []
+            for i in range(len(closes)):
+                if i+1 >= 14:
+                    rsi_val = compute_rsi(closes[i+1-14:i+1], period=14, exchange=exchange, pair=pair)
+                    rsi_list.append(rsi_val)
+                else:
+                    rsi_list.append(None)
             indicators['rsi_list'] = rsi_list
             indicators['rsi_14'] = rsi_list[-1] if rsi_list else None
         else:
