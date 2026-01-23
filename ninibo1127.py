@@ -1,7 +1,20 @@
 
 # --- bitbank用ccxtラッパー ---
+
 import os
 import ccxt
+# 表示用ライブラリ
+from tabulate import tabulate
+from colorama import Fore, Style, init as colorama_init
+colorama_init(autoreset=True)
+
+# 表形式＋色付きで出力する関数
+def print_table(data, headers=None, color=None):
+    table = tabulate(data, headers=headers, tablefmt="fancy_grid", floatfmt=".4f")
+    if color:
+        print(color + table + Style.RESET_ALL)
+    else:
+        print(table)
 
 def create_bitbank_exchange():
     api_key = os.getenv('BITBANK_API_KEY')
@@ -25,9 +38,16 @@ def get_latest_price(exchange, pair='BTC/JPY'):
         try:
             ticker = exchange.fetch_ticker(pair)
             if 'last' in ticker:
+                # 価格情報を表形式で表示
+                print_table([
+                    ["現在価格", ticker['last']],
+                    ["高値", ticker.get('high', '-')],
+                    ["安値", ticker.get('low', '-')],
+                    ["出来高", ticker.get('baseVolume', '-')]
+                ], headers=["項目", "値"], color=Fore.YELLOW)
                 return float(ticker['last'])
             else:
-                print(f"[RETRY] 価格情報に'last'がありません (attempt {attempt})")
+                print(Fore.RED + f"[RETRY] 価格情報に'last'がありません (attempt {attempt})" + Style.RESET_ALL)
         except Exception as e:
             print(f"[RETRY] 価格取得失敗 (attempt {attempt}): {e}")
         time.sleep(1)
@@ -62,9 +82,33 @@ def trade_decision(*args, **kwargs):
     last_buy_price = kwargs.get('last_buy_price')
     rsi = kwargs.get('rsi')
     bb_lower = kwargs.get('bb_lower')
-    print(f"[DEBUG] trade_decision: current_price={current_price}, btc_balance={btc_balance}, last_buy_price={last_buy_price}, rsi={rsi}, bb_lower={bb_lower}")
-    if btc_balance == 0 and (rsi is not None and rsi <= 35):
+    # 主要なトレード判断材料を表で表示
+    print_table([
+        ["現在価格", current_price],
+        ["BTC残高", btc_balance],
+        ["直近買値", last_buy_price],
+        ["RSI", rsi],
+        ["BB下限", bb_lower]
+    ], headers=["項目", "値"], color=Fore.GREEN)
+
+    # --- RSIが35未満になったらフラグを立て、次の足で買うロジック ---
+    # フラグ保存用（グローバル変数やファイル保存も可。ここでは簡易的にグローバル変数を使用）
+    global rsi_buy_flag
+    try:
+        rsi_buy_flag
+    except NameError:
+        rsi_buy_flag = False
+
+    # RSIが35未満ならフラグを立てる
+    if rsi is not None and rsi < 35:
+        rsi_buy_flag = True
+        return {'action': 'hold', 'amount': 0.0, 'price': current_price, 'buy_condition': False, 'sell_condition': False}
+
+    # フラグが立っていて、次の足で条件を満たしていれば買い
+    if btc_balance == 0 and rsi_buy_flag:
+        rsi_buy_flag = False  # フラグリセット
         return {'action': 'buy', 'amount': min_order_btc, 'price': current_price, 'buy_condition': True}
+
     return {'action': 'hold', 'amount': 0.0, 'price': current_price, 'buy_condition': False, 'sell_condition': False}
 def execute_order(*args, **kwargs):
     # 本番API呼び出し
@@ -78,10 +122,20 @@ def execute_order(*args, **kwargs):
             order = exchange.create_market_buy_order(pair, amount)
         else:
             order = exchange.create_market_sell_order(pair, amount)
-        print(f"[DEBUG] 注文APIレスポンス: {order}")
+        # 表形式で表示
+        order_disp = [
+            ["注文ID", order.get('id', order.get('order_id', 'N/A'))],
+            ["通貨ペア", order.get('symbol', pair)],
+            ["注文タイプ", order.get('type', 'market')],
+            ["売買", order.get('side', side)],
+            ["価格", order.get('price', '成行')],
+            ["数量", order.get('amount', amount)],
+            ["ステータス", order.get('status', 'N/A')],
+        ]
+        print_table(order_disp, headers=["項目", "値"], color=Fore.CYAN)
         return order
     except Exception as e:
-        print(f"[ERROR] 注文APIエラー: {e}")
+        print(Fore.RED + f"[ERROR] 注文APIエラー: {e}" + Style.RESET_ALL)
         return {'error': str(e)}
 def sell_all_positions(*args, **kwargs):
     # 本番API呼び出し
@@ -94,17 +148,27 @@ def sell_all_positions(*args, **kwargs):
     if total_btc > 0 and sell_amount > 0:
         try:
             order = exchange.create_market_sell_order(pair, sell_amount)
-            print(f"[DEBUG] 売却APIレスポンス: {order}")
+            # 表形式で表示
+            order_disp = [
+                ["注文ID", order.get('id', order.get('order_id', 'N/A'))],
+                ["通貨ペア", order.get('symbol', pair)],
+                ["注文タイプ", order.get('type', 'market')],
+                ["売買", order.get('side', 'sell')],
+                ["価格", order.get('price', '成行')],
+                ["数量", order.get('amount', sell_amount)],
+                ["ステータス", order.get('status', 'N/A')],
+            ]
+            print_table(order_disp, headers=["項目", "値"], color=Fore.MAGENTA)
             with open("sell_log.txt", "a", encoding="utf-8") as logf:
                 print(f"[DEBUG] 売却APIレスポンス: {order}", file=logf)
             results.append({'amount': sell_amount, 'order': order, 'status': 'sold'})
         except Exception as e:
-            print(f"[ERROR] 売却APIエラー: {e}")
+            print(Fore.RED + f"[ERROR] 売却APIエラー: {e}" + Style.RESET_ALL)
             with open("sell_log.txt", "a", encoding="utf-8") as logf:
                 print(f"[ERROR] 売却APIエラー: {e}", file=logf)
             results.append({'amount': sell_amount, 'error': str(e), 'status': 'error'})
     else:
-        print(f"[ERROR] 売却可能なBTCが不足しています（保有: {total_btc} BTC）")
+        print(Fore.RED + f"[ERROR] 売却可能なBTCが不足しています（保有: {total_btc} BTC）" + Style.RESET_ALL)
         results.append({'amount': sell_amount, 'error': 'Insufficient BTC', 'status': 'error'})
     return results
 def get_last_buy_price(state):
@@ -584,7 +648,12 @@ def compute_indicators(exchange, pair='BTC/JPY', timeframe='1h', limit=1000):
         indicators = {}
         # prepare lists
         closes = [float(r[4]) for r in raw if r and len(r) >= 5 and r[4] is not None]
-        print(f"[DEBUG] {timeframe}足closes本数: {len(closes)} 内容: {closes}")
+        # 足データの本数と一部サンプルを表で表示
+        closes_sample = closes[:5] if len(closes) > 5 else closes
+        print_table([
+            [f"{timeframe}足closes本数", len(closes)],
+            [f"closesサンプル", closes_sample]
+        ], headers=["項目", "値"], color=Fore.BLUE)
         highs = [float(r[2]) for r in raw if r and len(r) >= 3 and r[2] is not None]
         lows = [float(r[3]) for r in raw if r and len(r) >= 4 and r[3] is not None]
 
@@ -596,7 +665,11 @@ def compute_indicators(exchange, pair='BTC/JPY', timeframe='1h', limit=1000):
         indicators['atr_14'] = compute_atr(raw, period=14)
         # RSIリスト（反発判定用）
         if len(closes) >= 14:
-            print(f"[DEBUG] RSI計算前 closes({len(closes)}): {closes}")
+            # RSI計算前のclosesサンプルを表で表示
+            print_table([
+                ["RSI計算前closes本数", len(closes)],
+                ["closesサンプル", closes[:5] if len(closes) > 5 else closes]
+            ], headers=["項目", "値"], color=Fore.BLUE)
             rsi_list = []
             for i in range(len(closes)):
                 if i+1 >= 14:
@@ -604,7 +677,11 @@ def compute_indicators(exchange, pair='BTC/JPY', timeframe='1h', limit=1000):
                     rsi_list.append(rsi_val)
                 else:
                     rsi_list.append(None)
-            print(f"[DEBUG] RSI計算後 rsi_list({len(rsi_list)}): {rsi_list}")
+            # RSIリストの一部を表で表示
+            print_table([
+                ["RSIリスト本数", len(rsi_list)],
+                ["RSIリストサンプル", rsi_list[-5:] if len(rsi_list) > 5 else rsi_list]
+            ], headers=["項目", "値"], color=Fore.BLUE)
             indicators['rsi_list'] = rsi_list
             indicators['rsi_14'] = rsi_list[-1] if rsi_list else None
         else:
