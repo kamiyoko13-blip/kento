@@ -1,4 +1,4 @@
-
+print("ninibo1127.py:", __file__)
 # --- bitbank用ccxtラッパー ---
 
 import os
@@ -7,6 +7,10 @@ import ccxt
 from tabulate import tabulate
 from colorama import Fore, Style, init as colorama_init
 colorama_init(autoreset=True)
+
+# --- インジケータ計算関数（RSI・終値リストなど） ---
+import pandas as pd
+
 
 # 表形式＋色付きで出力する関数
 def print_table(data, headers=None, color=None):
@@ -29,43 +33,44 @@ def create_bitbank_exchange():
 
 # --- メインループ（Botの実行部分） ---
 import os
-import datetime
-
-def get_latest_price(exchange, pair='BTC/JPY'):
-    import time
-    max_retries = 3
-    for attempt in range(1, max_retries + 1):
-        try:
-            ticker = exchange.fetch_ticker(pair)
-            if 'last' in ticker:
-                # 価格情報を表形式で表示
-                print_table([
-                    ["現在価格", ticker['last']],
-                    ["高値", ticker.get('high', '-')],
-                    ["安値", ticker.get('low', '-')],
-                    ["出来高", ticker.get('baseVolume', '-')]
-                ], headers=["項目", "値"], color=Fore.YELLOW)
-                return float(ticker['last'])
-            else:
-                print(Fore.RED + f"[RETRY] 価格情報に'last'がありません (attempt {attempt})" + Style.RESET_ALL)
-        except Exception as e:
-            print(f"[RETRY] 価格取得失敗 (attempt {attempt}): {e}")
-        time.sleep(1)
-    print("[ERROR] 価格取得に3回失敗しました。Noneを返します。")
-    return None
-def send_notification(*args, **kwargs):
-    pass
-def set_last_buy_price(state, price):
-    state['last_buy_price'] = price
-def get_account_balance(exchange):
+import pandas as pd
+def compute_indicators(exchange, pair='BTC/JPY', timeframe='5m', limit=50, ohlcv_data=None):
+    """
+    指定したペア・タイムフレームのOHLCVデータからRSIや終値リストなどを計算して返す
+    ohlcv_dataが与えられていればそれを使い、なければAPIから取得
+    戻り値例: {'rsi_14': float, 'rsi_list': [...], 'closes': [...], ...}
+    """
     try:
-        if str(os.getenv('DRY_RUN', '0')).lower() in ('1', 'true', 'yes', 'on'):
-            return {
-                'total': {'JPY': 100000.0, 'BTC': 0.0},
-                'free': {'JPY': 100000.0, 'BTC': 0.0},
-                'used': {'JPY': 0.0, 'BTC': 0.0}
-            }
-        balance = exchange.fetch_balance()
+        if ohlcv_data is not None:
+            ohlcv = ohlcv_data
+        else:
+            ohlcv = exchange.fetch_ohlcv(pair, timeframe=timeframe, limit=limit)
+        if not ohlcv or len(ohlcv) < 15:
+            return {}
+        closes = [float(c[4]) for c in ohlcv]
+        df = pd.DataFrame(ohlcv, columns=['timestamp','open','high','low','close','volume'])
+        # RSI計算
+        def calc_rsi(series, period=14):
+            delta = series.diff()
+            up = delta.clip(lower=0)
+            down = -delta.clip(upper=0)
+            ma_up = up.rolling(window=period, min_periods=period).mean()
+            ma_down = down.rolling(window=period, min_periods=period).mean()
+            rsi = 100 - (100 / (1 + ma_up / ma_down))
+            # 念のため0～100の範囲にクリップ
+            rsi = rsi.clip(lower=0, upper=100)
+            return rsi.astype(float)
+        rsi_series = calc_rsi(df['close'], period=14)
+        rsi_list = rsi_series.tolist()
+        rsi_14 = rsi_list[-1] if len(rsi_list) >= 1 else None
+        return {
+            'rsi_14': rsi_14,
+            'rsi_list': rsi_list,
+            'closes': closes
+        }
+    except Exception as e:
+        print(f"[ERROR] compute_indicators失敗: {e}")
+        return {}
         return {
             'total': balance.get('total', {}),
             'free': balance.get('free', {}),
@@ -91,27 +96,38 @@ def trade_decision(*args, **kwargs):
         ["BB下限", bb_lower]
     ], headers=["項目", "値"], color=Fore.GREEN)
 
-    # --- RSIが35未満になったらフラグを立て、次の足で買うロジック ---
-    # フラグ保存用（グローバル変数やファイル保存も可。ここでは簡易的にグローバル変数を使用）
-    global rsi_buy_flag
+    # --- 5分足RSIが一度30未満になり、次の足で35～38に戻った瞬間に買うロジック ---
+    global rsi_buy_flag, prev_rsi_value
     try:
         rsi_buy_flag
     except NameError:
         rsi_buy_flag = False
+    try:
+        prev_rsi_value
+    except NameError:
+        prev_rsi_value = None
 
-    # RSIが35未満ならフラグを立てる
-    if rsi is not None and rsi < 35:
+    print(f"[DEBUG] trade_decision: rsi_buy_flag={rsi_buy_flag}, prev_rsi_value={prev_rsi_value}, rsi={rsi}, btc_balance={btc_balance}, min_order_btc={min_order_btc}, last_buy_price={last_buy_price}")
+
+    # RSIが30未満ならフラグを立て、前回値を記録
+    if rsi is not None and rsi < 30:
+        print(f"[DEBUG] RSI < 30: フラグセット rsi={rsi}")
         rsi_buy_flag = True
+        prev_rsi_value = rsi
         return {'action': 'hold', 'amount': 0.0, 'price': current_price, 'buy_condition': False, 'sell_condition': False}
 
-    # フラグが立っていて、次の足で条件を満たしていれば買い
-    if btc_balance == 0 and rsi_buy_flag:
+    # フラグが立っていて、次の足でRSIが35～38に戻った瞬間に買い
+    if btc_balance == 0 and rsi_buy_flag and rsi is not None and 35 <= rsi <= 38 and prev_rsi_value is not None:
+        print(f"[DEBUG] BUY条件成立: rsi={rsi}, prev_rsi_value={prev_rsi_value}")
         rsi_buy_flag = False  # フラグリセット
+        prev_rsi_value = None
         return {'action': 'buy', 'amount': min_order_btc, 'price': current_price, 'buy_condition': True}
 
+    # 条件を満たさない場合はhold
+    print(f"[DEBUG] HOLD: 条件未達 rsi={rsi}, rsi_buy_flag={rsi_buy_flag}, prev_rsi_value={prev_rsi_value}")
     return {'action': 'hold', 'amount': 0.0, 'price': current_price, 'buy_condition': False, 'sell_condition': False}
 def execute_order(*args, **kwargs):
-    # 本番API呼び出し
+    # 本番API呼び出し（必ず指値注文のみ対応）
     exchange = args[0] if len(args) > 0 else kwargs.get('exchange')
     pair = args[1] if len(args) > 1 else kwargs.get('pair', 'BTC/JPY')
     side = args[2] if len(args) > 2 else kwargs.get('side', 'buy')
@@ -119,16 +135,16 @@ def execute_order(*args, **kwargs):
     price = args[4] if len(args) > 4 else kwargs.get('price')
     try:
         if side == 'buy':
-            order = exchange.create_market_buy_order(pair, amount)
+            order = exchange.create_limit_buy_order(pair, amount, price)
         else:
-            order = exchange.create_market_sell_order(pair, amount)
+            order = exchange.create_limit_sell_order(pair, amount, price)
         # 表形式で表示
         order_disp = [
             ["注文ID", order.get('id', order.get('order_id', 'N/A'))],
             ["通貨ペア", order.get('symbol', pair)],
-            ["注文タイプ", order.get('type', 'market')],
+            ["注文タイプ", order.get('type', 'limit')],
             ["売買", order.get('side', side)],
-            ["価格", order.get('price', '成行')],
+            ["価格", order.get('price', price)],
             ["数量", order.get('amount', amount)],
             ["ステータス", order.get('status', 'N/A')],
         ]
@@ -210,21 +226,176 @@ def cancel_order(exchange, order_id, pair='BTC/JPY'):
         print(f"[ERROR] 注文キャンセルAPIエラー: {e}")
         return None
 def run_bot(exchange, fund_manager, dry_run=False):
+    # --- 5分足インジケータ取得・表示 ---
+    try:
+        # 5分足OHLCVデータ取得
+        ohlcv_5m = exchange.fetch_ohlcv('BTC/JPY', timeframe='5m', limit=50)
+        indicators_5m_overview = compute_indicators(exchange, pair='BTC/JPY', timeframe='5m', limit=50, ohlcv_data=ohlcv_5m)
+        rsi_5m_list = indicators_5m_overview.get('rsi_list', [])
+        closes_5m = indicators_5m_overview.get('closes', [])
+        rsi_5m = rsi_5m_list[-1] if rsi_5m_list else None
+        closes_sample_5m = closes_5m[:5] if len(closes_5m) > 5 else closes_5m
+        # RSI値がNone, NaN, 0の場合は"データ不足"や"計算不能"と表示
+        if rsi_5m is None or rsi_5m != rsi_5m:
+            rsi_5m_disp = "データ不足"
+        elif rsi_5m == 0:
+            rsi_5m_disp = "計算不能"
+        else:
+            rsi_5m_disp = int(rsi_5m)
+        print_table([
+            ["5m足RSI", rsi_5m_disp],
+            ["5m足closes本数", len(closes_5m)],
+            ["5m足closesサンプル", closes_sample_5m]
+        ], headers=["項目", "値"], color=Fore.CYAN)
+    except Exception as e:
+        print(f"[ERROR] 5分足インジケータ取得エラー: {e}")
+        print(f"[DEBUG] except到達: {e}")
+
+    print("\n[INFO] --- 売買判定タイムフレームの説明 ---")
+    print("[INFO] 1時間足: RSI35～40で反発時のみ売買判定を有効化")
+    print("[INFO] 15分足: 買い時はRSI45以上でフィルタ、売り時はRSI60～65で警戒")
+    print("[INFO] 5分足: RSI30割れ→35～38回復で最終的な売買判定（エントリー/イグジット）")
+    # --- 1時間足RSI反発フラグ ---
+    rsi_1h_list = None
+    rsi_1h_rebound = False
+    try:
+        indicators_1h = compute_indicators(exchange, pair='BTC/JPY', timeframe='1h', limit=50)
+        rsi_1h_list = indicators_1h.get('rsi_list', None)
+        if rsi_1h_list and len(rsi_1h_list) >= 2:
+            prev_rsi_1h = rsi_1h_list[-2]
+            latest_rsi_1h = rsi_1h_list[-1]
+            if 35 <= latest_rsi_1h <= 40 and latest_rsi_1h > prev_rsi_1h:
+                rsi_1h_rebound = True
+            print(f"[DEBUG] 1h足RSI反発判定: prev={prev_rsi_1h}, latest={latest_rsi_1h}, rebound={rsi_1h_rebound}")
+        else:
+            print(f"[DEBUG] 1h足RSIリスト条件未達: {rsi_1h_list}")
+    except Exception as e:
+        print(f"[ERROR] 1h足RSI反発判定エラー: {e}")
+
+    # --- 15分足インジケータ取得 ---
+    try:
+        indicators_15m = compute_indicators(exchange, pair='BTC/JPY', timeframe='15m', limit=50)
+        rsi_15m = indicators_15m.get('rsi_14')
+        bb_lower_15m = None
+        try:
+            closes_15m = [float(r) for r in indicators_15m.get('rsi_list', []) if r is not None]
+            import numpy as np
+            period = 14
+            if len(closes_15m) >= period:
+                sma_15m = np.mean(closes_15m[-period:])
+                std_15m = np.std(closes_15m[-period:])
+                bb_lower_15m = sma_15m - 2 * std_15m
+        except Exception:
+            bb_lower_15m = None
+        print_table([
+            ["15m足RSI", rsi_15m],
+            ["15m足BB下限", bb_lower_15m]
+        ], headers=["項目", "値"], color=Fore.MAGENTA)
+    except Exception as e:
+        print(f"[ERROR] 15分足インジケータ取得エラー: {e}")
+
+    # --- 5分足RSI30未満→35~38復帰時のみ買い判定 ---
+    def get_ohlcv(exchange, pair='BTC/JPY', timeframe='5m', limit=50):
+        # 本来は取引所APIからOHLCVデータを取得
+        return []
+
+    def generate_signals(df):
+        # 本来はシグナル判定ロジック
+        return None, None
+
     import datetime
-    # 現在時刻から夜間判定（例: 22時～翌6時を夜間とする）
     now = datetime.datetime.now()
     is_night = now.hour >= 22 or now.hour < 6
 
-    # シグナル判定（例: generate_signals(df) で取得）
-    # dfは直近のOHLCVデータ。既存のロジックに合わせて適宜修正してください。
-    # 例: df = get_ohlcv(exchange, PAIR, timeframe='5m', limit=200)
-    try:
-        df = get_ohlcv(exchange, 'BTC/JPY', timeframe='5m', limit=200)
-        signal, message = generate_signals(df)
-    except Exception:
-        signal, message = None, None
-    buy_signal = signal == 'buy_entry'
-    sell_signal = signal == 'sell_all'
+    buy_signal = False
+    sell_signal = False
+    rsi_15m_warn_buy = False
+    rsi_15m_warn_sell = False
+    # --- 1時間足RSIによるフィルタ ---
+    if indicators_1h and 'rsi_14' in indicators_1h:
+        rsi_1h = indicators_1h['rsi_14']
+        if rsi_1h < 45:
+            print(f"[INFO] 1時間足RSI<45のため何もしない (RSI={rsi_1h})")
+            return  # 何もしない
+        elif 55 <= rsi_1h <= 60:
+            # 5分足でエントリー価格+5%到達→直近価格-5%で売却
+            try:
+                df = get_ohlcv(exchange, 'BTC/JPY', timeframe='5m', limit=50)
+                indicators_5m = compute_indicators(exchange, pair='BTC/JPY', timeframe='5m', limit=50)
+                closes_5m = indicators_5m.get('closes', [])
+                rsi_5m_list = indicators_5m.get('rsi_list', [])
+                rsi_5m = rsi_5m_list[-1] if rsi_5m_list else None
+                print_table([
+                    ["5m足終値", closes_5m[-1] if closes_5m else None],
+                    ["5m足RSI", rsi_5m]
+                ], headers=["項目", "値"], color=Fore.CYAN)
+                if closes_5m:
+                    current_5m_price = closes_5m[-1]
+                    # エントリー価格取得（stateやlast_buy_priceから）
+                    entry_price = last_buy_price if last_buy_price else current_5m_price
+                    target_price = entry_price * 1.05
+                    stop_price = current_5m_price * 0.95
+                    if current_5m_price >= target_price:
+                        print(f"[INFO] 5分足でエントリー価格+5%到達: {current_5m_price} >= {target_price}")
+                        # 売りシグナル
+                        sell_signal = True
+                        # 指値売り注文等の実行処理をここに追加可
+                    elif current_5m_price <= stop_price:
+                        print(f"[INFO] 5分足で直近価格-5%到達: {current_5m_price} <= {stop_price}")
+                        # 売りシグナル
+                        sell_signal = True
+                        # 指値売り注文等の実行処理をここに追加可
+            except Exception as e:
+                print(f"[ERROR] 5分足価格判定エラー: {e}")
+        # それ以外は従来の判定
+        elif rsi_1h_rebound:
+            try:
+                df = get_ohlcv(exchange, 'BTC/JPY', timeframe='5m', limit=50)
+                # 5分足RSIリスト・終値を取得
+                indicators_5m = compute_indicators(exchange, pair='BTC/JPY', timeframe='5m', limit=50)
+                rsi_5m_list = indicators_5m.get('rsi_list', [])
+                closes_5m = indicators_5m.get('closes', [])
+                rsi_5m = rsi_5m_list[-1] if rsi_5m_list else None
+                print_table([
+                    ["5m足終値", closes_5m[-1] if closes_5m else None],
+                    ["5m足RSI", rsi_5m]
+                ], headers=["項目", "値"], color=Fore.CYAN)
+                if rsi_5m_list and len(rsi_5m_list) >= 2:
+                    prev_rsi_5m = rsi_5m_list[-2]
+                    latest_rsi_5m = rsi_5m_list[-1]
+                    # 直前が30未満、現在が35~38なら買い
+                    if prev_rsi_5m < 30 and 35 <= latest_rsi_5m <= 38:
+                        # 15分足RSIが45以上でなければ買いを実行しない
+                        if 'rsi_14' in indicators_15m:
+                            rsi_15m = indicators_15m['rsi_14']
+                            if rsi_15m >= 45:
+                                print(f"[DEBUG] 5m足RSI30→35~38復帰: prev={prev_rsi_5m}, latest={latest_rsi_5m}, 15m足RSI={rsi_15m}")
+                                buy_signal = True
+                            else:
+                                print(f"[INFO] 15m足RSI<45のため買い見送り (RSI={rsi_15m})")
+                        else:
+                            print("[WARN] 15m足RSI未取得のため買い見送り")
+                # 15分足RSI警戒ロジック
+                if 'rsi_14' in indicators_15m:
+                    rsi_15m = indicators_15m['rsi_14']
+                    if buy_signal and rsi_15m >= 45:
+                        rsi_15m_warn_buy = True
+                        print(f"[WARN] 15m足RSIが45以上: 買い時警戒 (RSI={rsi_15m})")
+                    if sell_signal and 60 <= rsi_15m <= 65:
+                        rsi_15m_warn_sell = True
+                        print(f"[WARN] 15m足RSIが60~65: 売り時警戒 (RSI={rsi_15m})")
+                # 売り判定は従来通り
+                signal, message = generate_signals(df)
+                sell_signal = signal == 'sell_all'
+            except Exception as e:
+                print(f"[ERROR] 5分足RSI判定エラー: {e}")
+                buy_signal = False
+                sell_signal = False
+        else:
+            print("[DEBUG] 1時間足RSI反発でないため買い判定スキップ")
+    else:
+        print("[WARN] 1時間足インジケータ取得失敗またはrsi_14未取得")
+
     import time
     # --- 必要な定数・変数を関数内で初期化 ---
     PAIR = 'BTC/JPY'
@@ -291,12 +462,12 @@ def run_bot(exchange, fund_manager, dry_run=False):
 
     while True:
         # --- 強いトレンド判定（例: 短期SMA > 長期SMA で強い上昇トレンド） ---
-        indicators_trend = compute_indicators(exchange, pair='BTC/JPY', timeframe='1h', limit=200)
+        indicators_trend = compute_indicators_long(exchange, pair='BTC/JPY', timeframe='1h', limit=50)
         sma_short = indicators_trend.get('sma_short_50', 0)
         sma_long = indicators_trend.get('sma_long_200', 0)
         is_strong_trend = sma_short > sma_long if sma_short and sma_long else False
         # 1時間足で逆張り可否を判定（逆張りが効きやすい状況のみエントリー許可）
-        indicators_1h = compute_indicators(exchange, pair='BTC/JPY', timeframe='1h', limit=100)
+        indicators_1h = compute_indicators_long(exchange, pair='BTC/JPY', timeframe='1h', limit=50)
         rsi_1h_list = indicators_1h.get('rsi_list', None)
         rsi_1h = indicators_1h.get('rsi_14')
         can_counter_trade = False
@@ -640,75 +811,82 @@ def run_bot(exchange, fund_manager, dry_run=False):
         elif buy_signal and not positions and is_strong_trend:
             print("[INFO] 強いトレンド中のため逆張り買いを回避")
 
-def compute_indicators(exchange, pair='BTC/JPY', timeframe='1h', limit=1000):
+def compute_indicators_long(exchange, pair='BTC/JPY', timeframe='1h', limit=1000):
     # Fetch OHLCV and compute a set of indicators. Returns dict of values (may contain None).
-    try:
-        # OHLCVデータ取得（本番用: 取引所APIから取得）
-        raw = exchange.fetch_ohlcv(pair, timeframe=timeframe, limit=limit)
-        indicators = {}
-        # prepare lists
-        closes = [float(r[4]) for r in raw if r and len(r) >= 5 and r[4] is not None]
-        # 足データの本数と一部サンプルを表で表示
-        closes_sample = closes[:5] if len(closes) > 5 else closes
-        print_table([
-            [f"{timeframe}足closes本数", len(closes)],
-            [f"closesサンプル", closes_sample]
-        ], headers=["項目", "値"], color=Fore.BLUE)
-        highs = [float(r[2]) for r in raw if r and len(r) >= 3 and r[2] is not None]
-        lows = [float(r[3]) for r in raw if r and len(r) >= 4 and r[3] is not None]
-
-        indicators['latest_close'] = closes[-1] if closes else None
-        indicators['sma_short_50'] = compute_sma_from_list(closes, 50)
-        indicators['sma_long_200'] = compute_sma_from_list(closes, 200)
-        indicators['ema_12'] = compute_ema(closes, 12)
-        indicators['ema_26'] = compute_ema(closes, 26)
-        indicators['atr_14'] = compute_atr(raw, period=14)
-        # RSIリスト（反発判定用）
-        if len(closes) >= 14:
-            # RSI計算前のclosesサンプルを表で表示
-            print_table([
-                ["RSI計算前closes本数", len(closes)],
-                ["closesサンプル", closes[:5] if len(closes) > 5 else closes]
-            ], headers=["項目", "値"], color=Fore.BLUE)
-            rsi_list = []
-            for i in range(len(closes)):
-                if i+1 >= 14:
-                    rsi_val = compute_rsi(closes[i+1-14:i+1], period=14, exchange=exchange, pair=pair)
-                    rsi_list.append(rsi_val)
-                else:
-                    rsi_list.append(None)
-            # RSIリストの一部を表で表示
-            print_table([
-                ["RSIリスト本数", len(rsi_list)],
-                ["RSIリストサンプル", rsi_list[-5:] if len(rsi_list) > 5 else rsi_list]
-            ], headers=["項目", "値"], color=Fore.BLUE)
-            indicators['rsi_list'] = rsi_list
-            indicators['rsi_14'] = rsi_list[-1] if rsi_list else None
-        else:
-            print(f"[DEBUG] closesが14未満のためRSI計算不可: closes({len(closes)})")
-            indicators['rsi_list'] = None
-            indicators['rsi_14'] = None
-        # recent high over 20 periods
+    import time
+    max_retries = 5
+    backoff_base = 3
+    for attempt in range(1, max_retries + 1):
         try:
-            indicators['recent_high_20'] = max(highs[-20:]) if highs and len(highs) >= 1 else None
-        except Exception:
-            indicators['recent_high_20'] = None
+            raw = exchange.fetch_ohlcv(pair, timeframe=timeframe, limit=limit)
+            print(f"[DEBUG] fetch_ohlcv: timeframe={timeframe}, limit={limit}, 実際取得件数={len(raw)}")
+            break
+        except Exception as e:
+            wait_sec = backoff_base * attempt
+            print(f"[RETRY] fetch_ohlcv失敗 (attempt {attempt}): {e} {wait_sec}s後リトライ")
+            if attempt == max_retries:
+                # エラーログ保存
+                with open('fetch_ohlcv_error.log', 'a', encoding='utf-8') as logf:
+                    logf.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')} [{pair} {timeframe}] fetch_ohlcv失敗: {e}\n")
+                # 通知（send_notificationがあれば呼ぶ）
+                try:
+                    send_notification('','', '', '', '', f"fetch_ohlcv失敗", f"{pair} {timeframe}でデータ取得に連続失敗: {e}")
+                except Exception:
+                    pass
+                raw = []
+            else:
+                time.sleep(wait_sec)
+    else:
+        raw = []
+    indicators = {}
+    # prepare lists
+    closes = [float(r[4]) for r in raw if r and len(r) >= 5 and r[4] is not None]
+    # 足データの本数と一部サンプルを表で表示
+    closes_sample = closes[:5] if len(closes) > 5 else closes
+    print_table([
+        [f"{timeframe}足closes本数", len(closes)],
+        [f"closesサンプル", closes_sample]
+    ], headers=["項目", "値"], color=Fore.BLUE)
+    highs = [float(r[2]) for r in raw if r and len(r) >= 3 and r[2] is not None]
+    lows = [float(r[3]) for r in raw if r and len(r) >= 4 and r[3] is not None]
 
-        return indicators
+    indicators['latest_close'] = closes[-1] if closes else None
+    indicators['sma_short_50'] = compute_sma_from_list(closes, 50)
+    indicators['sma_long_200'] = compute_sma_from_list(closes, 200)
+    indicators['ema_12'] = compute_ema(closes, 12)
+    indicators['ema_26'] = compute_ema(closes, 26)
+    indicators['atr_14'] = compute_atr(raw, period=14)
+    # RSIリスト（反発判定用）
+    if len(closes) >= 14:
+        # RSI計算前のclosesサンプルを表で表示
+        print_table([
+            ["RSI計算前closes本数", len(closes)],
+            ["closesサンプル", closes[:5] if len(closes) > 5 else closes]
+        ], headers=["項目", "値"], color=Fore.BLUE)
+        rsi_list = []
+        for i in range(len(closes)):
+            if i+1 >= 14:
+                rsi_val = compute_rsi(closes[i+1-14:i+1], period=14, exchange=exchange, pair=pair)
+                rsi_list.append(rsi_val)
+            else:
+                rsi_list.append(None)
+        # RSIリストの一部を表で表示
+        print_table([
+            ["RSIリスト本数", len(rsi_list)],
+            ["RSIリストサンプル", rsi_list[-5:] if len(rsi_list) > 5 else rsi_list]
+        ], headers=["項目", "値"], color=Fore.BLUE)
+        indicators['rsi_list'] = rsi_list
+        indicators['rsi_14'] = rsi_list[-1] if rsi_list else None
+    else:
+        print(f"[DEBUG] closesが14未満のためRSI計算不可: closes({len(closes)})")
+        indicators['rsi_list'] = None
+        indicators['rsi_14'] = None
+    # recent high over 20 periods
+    try:
+        indicators['recent_high_20'] = max(highs[-20:]) if highs and len(highs) >= 1 else None
     except Exception:
-        return {
-            'sma_short_50': None,
-            'sma_long_200': None,
-            'ema_12': None,
-            'ema_26': None,
-            'atr_14': None,
-            'rsi_14': None,
-            'recent_high_20': None,
-            'latest_close': None,
-            'sell_pressure': 0,
-            'pressure_ratio': None,
-            'signal': 'NEUTRAL'
-        }
+        indicators['recent_high_20'] = None
+    return indicators
 
 # --- 未定義関数・変数のダミー実装 ---
 def compute_sma_from_list(closes, period):
@@ -970,6 +1148,7 @@ import logging
 
 
 if __name__ == "__main__":
+    import time
     print("[DEBUG] ファイル先頭到達")
     print("mainブロック実行開始")
     print("[INFO] .envからBITBANK_API_KEY/BITBANK_API_SECRETを自動ロードします")
@@ -978,8 +1157,11 @@ if __name__ == "__main__":
         exchange = create_bitbank_exchange()  # bitbank用ccxtラッパーを必ず利用
         print("[DEBUG] FundManager初期化直前")
         fund_manager = None  # 必要ならFundManagerクラスをここで初期化
-        print("[DEBUG] run_bot呼び出し直前")
-        run_bot(exchange, fund_manager)
+        while True:
+            print("[DEBUG] run_bot呼び出し直前")
+            run_bot(exchange, fund_manager)
+            print("[INFO] 60秒待機中...")
+            time.sleep(60)
         print("[DEBUG] mainブロックtry直後（run_bot呼び出し後）")
     except Exception as e:
         print(f"[ERROR] mainブロック例外: {e}")
@@ -1832,42 +2014,6 @@ def analyze_orderbook_pressure(orderbook_data):
         }
 
 
-def compute_indicators(exchange, pair='BTC/JPY', timeframe='5m', limit=1000):
-    # Fetch OHLCV and compute a set of indicators. Returns dict of values (may contain None).
-    try:
-        # OHLCVデータ取得（ダミー実装）
-        raw = []
-        indicators = {}
-        # prepare lists
-        closes = [float(r[4]) for r in raw if r and len(r) >= 5 and r[4] is not None]
-        highs = [float(r[2]) for r in raw if r and len(r) >= 3 and r[2] is not None]
-        lows = [float(r[3]) for r in raw if r and len(r) >= 4 and r[3] is not None]
-
-        indicators['latest_close'] = closes[-1] if closes else None
-        indicators['sma_short_50'] = compute_sma_from_list(closes, 50)
-        indicators['sma_long_200'] = compute_sma_from_list(closes, 200)
-        indicators['ema_12'] = compute_ema(closes, 12)
-        indicators['ema_26'] = compute_ema(closes, 26)
-        indicators['atr_14'] = compute_atr(raw, period=14)
-        indicators['rsi_14'] = compute_rsi(closes, period=14, exchange=exchange, pair=pair)
-        # recent high over 20 periods
-        try:
-            indicators['recent_high_20'] = max(highs[-20:]) if highs and len(highs) >= 1 else None
-        except Exception:
-            indicators['recent_high_20'] = None
-
-        return indicators
-    except Exception:
-        return {
-            'sma_short_50': None,
-            'sma_long_200': None,
-            'ema_12': None,
-            'ema_26': None,
-            'atr_14': None,
-            'rsi_14': None,
-            'recent_high_20': None,
-            'latest_close': None
-        }
 
 def compute_sma_from_list(values, period):
     # Compute simple moving average from a list
@@ -1974,17 +2120,19 @@ def get_last_buy_time(state):
 
 
 def set_last_buy_time(state, ts=None):
+    import time
     state["last_buy_time"] = ts or int(time.time())
 
 
 def record_position(state, side, price, qty):
+    import time
     print("DEBUG: record_position called", side, price, qty)
     state.setdefault("positions", [])
     state["positions"].append({
         "side": side,
         "price": float(price),
         "qty": float(qty),
-        "time": int(time())
+        "time": int(time.time())
     })
     if len(state["positions"]) > 50:
         state["positions"] = state["positions"][-50:]
