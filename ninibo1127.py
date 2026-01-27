@@ -1,3 +1,96 @@
+import numpy as np
+import talib
+# --- EMAの傾き計算関数 ---
+def calc_ema_slope(closes, period=20, span=3):
+    """
+    closes: 終値リスト（最新が最後）
+    period: EMAの期間
+    span: 何本前と比較するか
+    return: (最新EMA - span本前EMA) / span
+    """
+    if len(closes) < period + span:
+        return None
+    ema = talib.EMA(np.array(closes), timeperiod=period)
+    return float(ema[-1] - ema[-1-span]) / span
+# --- 1時間足 急落中逆張り禁止判定 ---
+def is_h1_reverse_trade_forbidden(candles_h1, lookback=3):
+    """
+    1時間足で直近lookback本の終値が連続で下落していたら逆張り禁止（急落中のみ禁止）
+    :param candles_h1: 1時間足のローソク足リスト（各要素はdictで'close'キーを持つ、最新が最後）
+    :param lookback: 何本連続で下落したら禁止か（デフォルト3本）
+    :return: True（逆張り禁止）, False
+    """
+    if len(candles_h1) < lookback + 1:
+        return False
+    for i in range(-lookback, 0):
+        if candles_h1[i]['close'] >= candles_h1[i-1]['close']:
+            return False
+    return True
+
+# --- 5分足買いシグナル判定 ---
+def get_buy_signal_5m(rsi_5m, rsi_5m_series, candles_5m, candles_h1, rsi_lookback=3, rsi_tolerance=1.0, h1_lookback=3):
+    """
+    5分足の買いシグナル判定（1時間足の急落中は除外）
+    :param rsi_5m: 直近の5分足RSI
+    :param rsi_5m_series: 5分足RSI時系列（最新が最後）
+    :param candles_5m: 5分足ローソク足リスト（各要素はdictで'close'キーを持つ、最新が最後）
+    :param candles_h1: 1時間足ローソク足リスト（各要素はdictで'close'キーを持つ、最新が最後）
+    :param rsi_lookback: rsi_flatの本数
+    :param rsi_tolerance: rsi_flatの許容幅
+    :param h1_lookback: 1時間足急落判定本数
+    :return: True（買いシグナル）, False
+    """
+    buy_signal = False
+    if rsi_5m <= 35 and rsi_flat(rsi_5m_series, lookback=rsi_lookback, tolerance=rsi_tolerance):
+        if len(candles_5m) >= 2 and candles_5m[-1]['close'] > candles_5m[-2]['close']:
+            buy_signal = True
+    if is_h1_reverse_trade_forbidden(candles_h1, lookback=h1_lookback):
+        buy_signal = False
+    return buy_signal
+# --- 1時間足RSI環境判定関数 ---
+def is_h1_enviroment_ok(rsi_h1, rsi_h1_series, lookback=3, tolerance=1.0):
+    """
+    1時間足RSIが35以上かつ横ばいならTrue
+    :param rsi_h1: 直近の1時間足RSI値
+    :param rsi_h1_series: 1時間足RSIの時系列（最新が最後）
+    :param lookback: rsi_flatの本数（推奨: 3）
+    :param tolerance: rsi_flatの許容幅（推奨: 0.8～1.2）
+    :return: True（環境OK）, False
+    """
+    return rsi_h1 >= 35 and rsi_flat(rsi_h1_series, lookback=lookback, tolerance=tolerance)
+# --- 1時間足のRSIリスト取得関数 ---
+def get_rsi_1h_series(exchange, pair='BTC/JPY', limit=50, ohlcv_data=None):
+    """
+    1時間足のOHLCVデータからRSIリストを返す
+    :param exchange: ccxtの取引所インスタンス
+    :param pair: 通貨ペア
+    :param limit: データ本数
+    :param ohlcv_data: OHLCVデータ（省略時はAPI取得）
+    :return: RSIリスト（最新が最後）
+    """
+    try:
+        if ohlcv_data is not None:
+            ohlcv = ohlcv_data
+        else:
+            ohlcv = exchange.fetch_ohlcv(pair, timeframe='1h', limit=limit)
+        if not ohlcv or len(ohlcv) < 15:
+            return []
+        closes = [float(c[4]) for c in ohlcv]
+        df = pd.DataFrame(ohlcv, columns=['timestamp','open','high','low','close','volume'])
+        def calc_rsi(series, period=14):
+            delta = series.diff()
+            up = delta.clip(lower=0)
+            down = -delta.clip(upper=0)
+            ma_up = up.rolling(window=period, min_periods=period).mean()
+            ma_down = down.rolling(window=period, min_periods=period).mean()
+            rsi = 100 - (100 / (1 + ma_up / ma_down))
+            rsi = rsi.clip(lower=0, upper=100)
+            return rsi.astype(float)
+        rsi_series = calc_rsi(df['close'], period=14)
+        return rsi_series.tolist()
+    except Exception as e:
+        print(f"[ERROR] get_rsi_1h_series失敗: {e}")
+        return []
 print("ninibo1127.py:", __file__)
 # --- bitbank用ccxtラッパー ---
 
@@ -18,6 +111,43 @@ colorama_init(autoreset=True)
 
 # --- インジケータ計算関数（RSI・終値リストなど） ---
 import pandas as pd
+
+# --- RSI横ばい判定関数 ---
+def rsi_flat(rsi_series, lookback=3, tolerance=1.0):
+    """
+    直近lookback本のRSIがtolerance以内で横ばいか判定
+    :param rsi_series: pandas.Seriesまたはリスト（RSI値の時系列、最新が最後）
+    :param lookback: 判定する本数（推奨: 3）
+    :param tolerance: 許容する最大値幅（推奨: 0.8～1.2）
+    :return: True（横ばい）, False（横ばいでない）
+    """
+    recent = rsi_series[-lookback:]
+    return max(recent) - min(recent) <= tolerance
+
+# --- 5分足主導 売られたパターン判定 ---
+def is_5m_oversold_pattern(rsi_5m_series, close_series, lookback=3, tolerance=1.0):
+    """
+    5分足主導の売られたパターン判定
+    条件:
+      - RSIが35未満
+      - RSIが横ばい（止まった）
+      - 価格が直近で切り上げた（close_0 > close_1）
+    :param rsi_5m_series: RSIの時系列（最新が最後）
+    :param close_series: 終値の時系列（最新が最後）
+    :param lookback: rsi_flatの本数（推奨: 3）
+    :param tolerance: rsi_flatの許容幅（推奨: 0.8～1.2）
+    :return: True（パターン成立）, False
+    """
+    if len(rsi_5m_series) < lookback or len(close_series) < 2:
+        return False
+    rsi_now = rsi_5m_series[-1]
+    if rsi_now >= 35:
+        return False
+    if not rsi_flat(rsi_5m_series, lookback=lookback, tolerance=tolerance):
+        return False
+    if close_series[-1] <= close_series[-2]:
+        return False
+    return True
 
 
 # 表形式＋色付きで出力する関数
@@ -854,12 +984,16 @@ def run_bot(exchange, fund_manager, dry_run=False):
                 forbidden = False
                         # --- 1時間足終値リストを取得 ---
             closes_h1 = indicators_1h.get('closes', [])
-            # --- rsi_1h, prev_rsi_1hを安全に定義 ---
+            # --- rsi_1h, prev_rsi_1h, ema20_slopeを安全に定義 ---
             rsi_1h = None
             prev_rsi_1h = None
-            if 'indicators_1h' in locals() and indicators_1h and 'rsi_list' in indicators_1h and len(indicators_1h['rsi_list']) >= 2:
-                prev_rsi_1h = indicators_1h['rsi_list'][-2]
-                rsi_1h = indicators_1h['rsi_list'][-1]
+            ema20_slope = None
+            if 'indicators_1h' in locals() and indicators_1h:
+                if 'rsi_list' in indicators_1h and len(indicators_1h['rsi_list']) >= 2:
+                    prev_rsi_1h = indicators_1h['rsi_list'][-2]
+                    rsi_1h = indicators_1h['rsi_list'][-1]
+                if 'closes' in indicators_1h and indicators_1h['closes'] and len(indicators_1h['closes']) >= 23:
+                    ema20_slope = calc_ema_slope(indicators_1h['closes'], period=20, span=3)
             # --- scoreを動的に計算する例 ---
             score = 0
             # 5分足RSIが35~38なら+1
