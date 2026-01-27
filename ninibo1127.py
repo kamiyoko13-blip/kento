@@ -2,6 +2,14 @@ print("ninibo1127.py:", __file__)
 # --- bitbank用ccxtラッパー ---
 
 import os
+import logging
+logger = logging.getLogger("ninibo_logger")
+if not logger.hasHandlers():
+    handler = logging.StreamHandler()
+    formatter = logging.Formatter('%(asctime)s %(levelname)s %(message)s')
+    handler.setFormatter(formatter)
+    logger.addHandler(handler)
+    logger.setLevel(logging.INFO)
 import ccxt
 # 表示用ライブラリ
 from tabulate import tabulate
@@ -96,7 +104,7 @@ def trade_decision(*args, **kwargs):
         ["BB下限", bb_lower]
     ], headers=["項目", "値"], color=Fore.GREEN)
 
-    # --- 5分足RSIが一度30未満になり、次の足で35～38に戻った瞬間に買うロジック ---
+    # --- 5分足RSIが一度でも30未満になったらフラグを立て、35以上40以下に戻ったら買い、買ったらフラグを下ろす ---
     global rsi_buy_flag, prev_rsi_value
     try:
         rsi_buy_flag
@@ -109,15 +117,15 @@ def trade_decision(*args, **kwargs):
 
     print(f"[DEBUG] trade_decision: rsi_buy_flag={rsi_buy_flag}, prev_rsi_value={prev_rsi_value}, rsi={rsi}, btc_balance={btc_balance}, min_order_btc={min_order_btc}, last_buy_price={last_buy_price}")
 
-    # RSIが30未満ならフラグを立て、前回値を記録
+    # RSIが30未満ならフラグを立てる（何度も立て直してもOK）
     if rsi is not None and rsi < 30:
         print(f"[DEBUG] RSI < 30: フラグセット rsi={rsi}")
         rsi_buy_flag = True
         prev_rsi_value = rsi
         return {'action': 'hold', 'amount': 0.0, 'price': current_price, 'buy_condition': False, 'sell_condition': False}
 
-    # フラグが立っていて、次の足でRSIが35～38に戻った瞬間に買い
-    if btc_balance == 0 and rsi_buy_flag and rsi is not None and 35 <= rsi <= 38 and prev_rsi_value is not None:
+    # フラグが立っていて、RSIが35以上40以下で買い（1回のみ）
+    if btc_balance == 0 and rsi_buy_flag and rsi is not None and 35 <= rsi <= 40 and prev_rsi_value is not None:
         print(f"[DEBUG] BUY条件成立: rsi={rsi}, prev_rsi_value={prev_rsi_value}")
         rsi_buy_flag = False  # フラグリセット
         prev_rsi_value = None
@@ -461,6 +469,9 @@ def run_bot(exchange, fund_manager, dry_run=False):
         return False
 
     while True:
+        # --- 1時間足逆張り禁止ロジックの閾値定義 ---
+        RSI_H1_FORBIDDEN = 40
+        RSI_H1_EXTREME = 30
         # --- 強いトレンド判定（例: 短期SMA > 長期SMA で強い上昇トレンド） ---
         indicators_trend = compute_indicators_long(exchange, pair='BTC/JPY', timeframe='1h', limit=50)
         sma_short = indicators_trend.get('sma_short_50', 0)
@@ -473,6 +484,25 @@ def run_bot(exchange, fund_manager, dry_run=False):
         can_counter_trade = False
         prev_rsi_1h = None
         latest_rsi_1h = None
+        # --- 5分足・15分足RSIを毎ループ表示 ---
+        try:
+            indicators_5m = compute_indicators(exchange, pair='BTC/JPY', timeframe='5m', limit=50)
+            rsi_5m_list = indicators_5m.get('rsi_list', [])
+            rsi_5m = rsi_5m_list[-1] if rsi_5m_list else None
+            print_table([
+                ["5m足RSI", rsi_5m if rsi_5m is not None else "データ不足"]
+            ], headers=["項目", "値"], color=Fore.CYAN)
+        except Exception as e:
+            print(f"[ERROR] 5分足RSI表示エラー: {e}")
+
+        try:
+            indicators_15m = compute_indicators(exchange, pair='BTC/JPY', timeframe='15m', limit=50)
+            rsi_15m = indicators_15m.get('rsi_14')
+            print_table([
+                ["15m足RSI", rsi_15m if rsi_15m is not None else "データ不足"]
+            ], headers=["項目", "値"], color=Fore.MAGENTA)
+        except Exception as e:
+            print(f"[ERROR] 15分足RSI表示エラー: {e}")
         if not rsi_1h_list:
             print(f"[WARN] 1時間足のRSIリストが取得できません: {rsi_1h_list}", flush=True)
             time.sleep(10)
@@ -809,7 +839,55 @@ def run_bot(exchange, fund_manager, dry_run=False):
                 order = execute_order(exchange, PAIR, 'sell', MIN_ORDER_BTC, limit_price)
                 print(f"[INFO] 再指値売り注文発行: {limit_price}")
         elif buy_signal and not positions and is_strong_trend:
-            print("[INFO] 強いトレンド中のため逆張り買いを回避")
+            # --- forbidden判定（RSI・EMA傾き・RSI下降） ---
+            forbidden = False
+            rsi_H1_is_falling = False
+            if rsi_1h is not None and prev_rsi_1h is not None:
+                rsi_H1_is_falling = rsi_1h < prev_rsi_1h
+            if (
+                ema20_slope is not None and rsi_1h is not None and rsi_H1_is_falling and
+                ema20_slope < -0.25 and rsi_1h < RSI_H1_FORBIDDEN
+            ):
+                forbidden = True
+            # 例外：極端な売られ過ぎは逆張り許可
+            if rsi_1h is not None and rsi_1h < RSI_H1_EXTREME:
+                forbidden = False
+                        # --- 1時間足終値リストを取得 ---
+            closes_h1 = indicators_1h.get('closes', [])
+            # --- rsi_1h, prev_rsi_1hを安全に定義 ---
+            rsi_1h = None
+            prev_rsi_1h = None
+            if 'indicators_1h' in locals() and indicators_1h and 'rsi_list' in indicators_1h and len(indicators_1h['rsi_list']) >= 2:
+                prev_rsi_1h = indicators_1h['rsi_list'][-2]
+                rsi_1h = indicators_1h['rsi_list'][-1]
+            # --- scoreを動的に計算する例 ---
+            score = 0
+            # 5分足RSIが35~38なら+1
+            if rsi_5m is not None and 35 <= rsi_5m <= 38:
+                score += 1
+            # 1時間足RSIが35~40で反発なら+1
+            if rsi_1h is not None and 35 <= rsi_1h <= 40 and rsi_1h > prev_rsi_1h:
+                score += 1
+            # BB下限付近なら+1
+            if bb_lower is not None and current_price <= bb_lower:
+                score += 1
+            # 強いトレンドなら+1
+            if is_strong_trend:
+                score += 1
+            # forbiddenならscore-1
+            forbidden = False  # forbidden未定義エラー対策
+            if forbidden:
+                score -= 1
+            # --- ログ出力追加 ---
+            try:
+                logger.info(
+                    f"H! forbidden=({forbidden}), "
+                    f"score=({score}), "
+                    f"rsi5m=({rsi_5m:.1f}), rsi1h=({rsi_1h:.1f}), bb_lower=({bb_lower}), price=({current_price})"
+                )
+            except Exception as e:
+                print(f"[WARN] logger.info出力失敗: {e}")
+            print("[INFO] 強いトレンド中のため逆張り買いを回避 (score計算済み)")
 
 def compute_indicators_long(exchange, pair='BTC/JPY', timeframe='1h', limit=1000):
     # Fetch OHLCV and compute a set of indicators. Returns dict of values (may contain None).
@@ -2032,10 +2110,17 @@ def write_indicators_csv(indicators: dict, pair: str, signal: str = 'NONE', csv_
             if not file_exists:
                 writer.writerow(['timestamp', 'pair', 'price', 'sma_short_50', 'sma_long_200', 'ema_12', 'ema_26', 'atr_14', 'rsi_14', 'recent_high_20', 'signal'])
             ts = datetime.datetime.now(JST).isoformat()
+            # 必要ならここでlogger.infoを呼ぶ（値は関数引数で渡すこと）
+            logger.info(
+                f"CSV: ts={ts}, pair={pair}, price={indicators.get('price')}, "
+                f"sma_short_50={indicators.get('sma_short_50')}, sma_long_200={indicators.get('sma_long_200')}, "
+                f"ema_12={indicators.get('ema_12')}, ema_26={indicators.get('ema_26')}, atr_14={indicators.get('atr_14')}, "
+                f"rsi_14={indicators.get('rsi_14')}, recent_high_20={indicators.get('recent_high_20')}, signal={signal}"
+            )
             writer.writerow([
                 ts,
                 pair,
-                indicators.get('latest_close'),
+                indicators.get('price'),
                 indicators.get('sma_short_50'),
                 indicators.get('sma_long_200'),
                 indicators.get('ema_12'),
