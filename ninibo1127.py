@@ -38,7 +38,7 @@ def generate_signals(df):
             return 'hold', f'RSI={int(rsi)} 通常'
     return 'hold', 'no signal'
 # --- OHLCV取得のラッパー関数 ---
-def get_ohlcv(exchange, symbol, timeframe='5m', limit=50):
+def get_ohlcv(exchange, symbol, timeframe='5m', limit=300):
     return exchange.fetch_ohlcv(symbol, timeframe=timeframe, limit=limit)
 # --- DRY_RUN用のデフォルト価格定数 ---
 DRY_RUN_PRICE = 13000000  # 例: 1300万円（2026年1月相場に合わせて調整）
@@ -166,7 +166,7 @@ def calc_ema_slope(closes, period=20, span=3):
             except Exception as e:
                 print(f"[ERROR] 取引履歴保存エラー: {e}")
 # --- 1時間足のRSIリスト取得関数 ---
-def get_rsi_1h_series(exchange, pair='BTC/JPY', limit=50, ohlcv_data=None):
+def get_rsi_1h_series(exchange, pair='BTC/JPY', limit=300, ohlcv_data=None):
     # 1時間足のOHLCVデータからRSIリストを返す
     import os
     import time
@@ -269,7 +269,7 @@ def create_bitbank_exchange():
 
 
 # --- メインループ（Botの実行部分） ---
-def compute_indicators(exchange, pair='BTC/JPY', timeframe='5m', limit=50, ohlcv_data=None):
+def compute_indicators(exchange, pair='BTC/JPY', timeframe='5m', limit=300, ohlcv_data=None):
     # Calculate RSI and close list from OHLCV data
     try:
         if ohlcv_data is not None:
@@ -480,58 +480,161 @@ def cancel_order(exchange, order_id, pair='BTC/JPY'):
     except Exception as e:
         print(f"[ERROR] 注文キャンセルAPIエラー: {e}")
         return None
-def run_bot(exchange, fund_manager, dry_run=False):
+def run_bot(exchange, fund_manager, dry_run=False, smtp_host=None, smtp_port=None, smtp_user=None, smtp_password=None, to_email=None):
+    import numpy as np
+    import talib
+    from colorama import Fore, Style
+    # --- closes_5m, ohlcv_15mを必ず定義（未定義参照エラー防止） ---
+    closes_5m = []
+    ohlcv_15m = []
+    try:
+        ohlcv_5m = exchange.fetch_ohlcv('BTC/JPY', timeframe='5m', limit=686)
+        closes_5m = [float(r[4]) for r in ohlcv_5m if r and len(r) >= 5 and r[4] is not None]
+    except Exception as e:
+        print(f"[ERROR] 5分足データ取得エラー: {e}")
+
+    # --- EMA系出力 ---
+    ema488_5m = ema494_5m = ema405_5m = ema660_5m = None
+    price_now = closes_5m[-1] if closes_5m else None
+    if closes_5m and len(closes_5m) >= 488:
+        ema488_5m = float(talib.EMA(np.array(closes_5m), timeperiod=488)[-1])
+        print(f"[DEBUG] 5m足EMA488: {ema488_5m}")
+    if closes_5m and len(closes_5m) >= 494:
+        ema494_5m = float(talib.EMA(np.array(closes_5m), timeperiod=494)[-1])
+    if closes_5m and len(closes_5m) >= 405:
+        ema405_5m = float(talib.EMA(np.array(closes_5m), timeperiod=405)[-1])
+    if closes_5m and len(closes_5m) >= 660:
+        ema660_5m = float(talib.EMA(np.array(closes_5m), timeperiod=660)[-1])
+        print(f"[DEBUG] 価格: {price_now}, EMA660: {ema660_5m}")
+    print_table([
+        ["5m足EMA488", ema488_5m],
+        ["5m足EMA494 (pritry赤波線)", ema494_5m],
+        ["5m足EMA405", ema405_5m],
+        ["5m足EMA660 (赤波線)", ema660_5m],
+        ["5m足現在価格", price_now]
+    ], headers=["項目", "値"], color=Fore.MAGENTA)
+
+    # --- 1時間足OHLCVデータ取得 ---
     print("[DEBUG] run_bot: 1時間足OHLCVデータ取得開始")
     try:
-        ohlcv_1h = exchange.fetch_ohlcv('BTC/JPY', timeframe='1h', limit=50)
+        ohlcv_1h = exchange.fetch_ohlcv('BTC/JPY', timeframe='1h', limit=300)
         print(f"[DEBUG] ohlcv_1h: {ohlcv_1h[:3]} ... total={len(ohlcv_1h)}")
         if not ohlcv_1h or len(ohlcv_1h) < 15:
             print(f"[WARN] 1時間足OHLCVデータが{len(ohlcv_1h) if ohlcv_1h else 0}本しかありません。5分足から合成します")
-            ohlcv_5m = exchange.fetch_ohlcv('BTC/JPY', timeframe='5m', limit=180)
+            ohlcv_5m = exchange.fetch_ohlcv('BTC/JPY', timeframe='5m', limit=300)
             ohlcv_1h = resample_ohlcv_5m_to_1h(ohlcv_5m)
             print(f"[DEBUG] 合成後の1時間足: {ohlcv_1h[:3]} ... total={len(ohlcv_1h)}")
-        if not ohlcv_1h or len(ohlcv_1h) < 15:
-            print("[ERROR] 1時間足データが15本未満です。RSI計算不可")
-            rsi_1h_disp = "データ不足"
-            closes_1h_valid = []
-            closes_1h_sample = "データ不足"
-        else:
-            indicators_1h = compute_indicators(exchange, pair='BTC/JPY', timeframe='1h', limit=50, ohlcv_data=ohlcv_1h)
-            print(f"[DEBUG] indicators_1h: {indicators_1h}")
-            rsi_1h = indicators_1h.get('rsi_14')
-            print(f"[DEBUG] rsi_1h: {rsi_1h}")
-            closes_1h = indicators_1h.get('closes', [])
-            import math
-            closes_1h_valid = [v for v in closes_1h if v is not None and not (isinstance(v, float) and math.isnan(v))]
-            if len(closes_1h_valid) >= 14 and rsi_1h is not None and not (isinstance(rsi_1h, float) and math.isnan(rsi_1h)):
-                rsi_1h_disp = int(rsi_1h)
-                closes_1h_sample = closes_1h_valid[:5] if closes_1h_valid else []
-            else:
-                print(f"[ERROR] 1時間足データが15本未満です。RSI計算不可")
-                rsi_1h_disp = "データ不足"
-                closes_1h_sample = "データ不足"
-        print_table([
-            ["1h足RSI", rsi_1h_disp],
-            ["1h足closes本数", len(closes_1h_valid)],
-            ["1h足closesサンプル", closes_1h_sample]
-        ], headers=["項目", "値"], color=Fore.MAGENTA)
-    except Exception as e:
-        print(f"[ERROR] run_bot: 1時間足OHLCVデータ取得・合成エラー: {e}")
-        import traceback
-        traceback.print_exc()
+        # --- 1時間足EMA100傾き率メインの買い判定ロジック ---
+        closes_1h = [float(r[4]) for r in ohlcv_1h if r and len(r) >= 5 and r[4] is not None]
+        can_buy = False
+        if len(closes_1h) >= 103:
+            import numpy as np
+            import talib
+            price_1h = closes_1h[-1]
+            ema100_1h = float(talib.EMA(np.array(closes_1h), timeperiod=100)[-1])
+            ema100_prev = float(talib.EMA(np.array(closes_1h[:-3]), timeperiod=100)[-1])
+            ema100_slope = (ema100_1h - ema100_prev) / 3 / ema100_1h
+            # ボリンジャーバンド
+            sma_1h = float(talib.SMA(np.array(closes_1h), timeperiod=20)[-1])
+            std_1h = float(np.std(closes_1h[-20:]))
+            bb_upper_1h = sma_1h + 2 * std_1h
+            bb_lower_1h = sma_1h - 2 * std_1h
+            dist_to_bb_upper = bb_upper_1h - price_1h
+            dist_to_bb_lower = price_1h - bb_lower_1h
+            rsi_1h = float(talib.RSI(np.array(closes_1h), timeperiod=14)[-1]) if len(closes_1h) >= 15 else None
+            print(f"[DEBUG] 1h足EMA100={ema100_1h}, EMA100傾き率={ema100_slope:.5f}, 現在価格={price_1h}")
+            print(f"[DEBUG] 1h足BB上限={bb_upper_1h}, BB下限={bb_lower_1h}, BB上まで={dist_to_bb_upper}, BB下まで={dist_to_bb_lower}")
+            if rsi_1h is not None:
+                print(f"[DEBUG] 1h足RSI={rsi_1h}")
+            # --- EMA100傾き率で判定 ---
+            if ema100_slope < -0.001:
+                print("[INFO] 1時間足: EMA100傾き率<-0.1%で買い禁止")
+                can_buy = False
+            elif price_1h < ema100_1h:
+                # BB下限タッチ+RSI回復など厳しめ条件
+                bb_touch = price_1h <= bb_lower_1h * 1.01  # BB下限付近
+                rsi_recover = rsi_1h is not None and rsi_1h > 35
+                if bb_touch and rsi_recover:
+                    print("[INFO] 1時間足: EMA100下＆BB下限タッチ+RSI回復で買い可")
+                    try:
+                        # --- 5分足テーブル ---
+                        print("[DEBUG] run_bot: get_ohlcv呼び出し前")
+                        df = get_ohlcv(exchange, 'BTC/JPY', timeframe='5m', limit=300)
+                        print(f"[DEBUG] 取得した5分足データ: ... total={len(df) if df is not None else 0}")
+                        indicators_5m = compute_indicators(exchange, pair='BTC/JPY', timeframe='5m', limit=300, ohlcv_data=df)
+                        ema100_slope_5m = None
+                        rsi_5m = None
+                        closes_5m = []
+                        if indicators_5m:
+                            import math
+                            closes_5m = indicators_5m.get('closes', [])
+                            rsi_5m = indicators_5m.get('rsi_14')
+                            closes_5m_valid = [v for v in closes_5m if v is not None and not (isinstance(v, float) and math.isnan(v))]
+                            rsi_5m_disp = int(rsi_5m) if rsi_5m is not None and not (isinstance(rsi_5m, float) and math.isnan(rsi_5m)) else "データ不足"
+                            print_table([
+                                ["5m足RSI", rsi_5m_disp],
+                                ["5m足closes本数", len(closes_5m_valid)],
+                                ["5m足closesサンプル", closes_5m_valid[:5] if closes_5m_valid else []]
+                            ], headers=["項目", "値"], color=Fore.CYAN)
 
-    print("[DEBUG] run_bot: 開始")
+                            # --- 5分足EMA100傾き率計算と厳格な買い禁止判定 ---
+                            if len(closes_5m) >= 103:
+                                import numpy as np
+                                import talib
+                                ema100_now = float(talib.EMA(np.array(closes_5m), timeperiod=100)[-1])
+                                ema100_prev = float(talib.EMA(np.array(closes_5m[:-3]), timeperiod=100)[-1])
+                                ema100_slope_5m = (ema100_now - ema100_prev) / 3 / ema100_now  # 割合で傾き率
+                                print(f"[DEBUG] 5m足EMA100傾き率: {ema100_slope_5m:.5f}")
+                                if ema100_slope_5m < -0.0015:
+                                    print(Fore.MAGENTA + f"[INFO] 5分足EMA100傾き率が-0.15%未満（{ema100_slope_5m*100:.3f}%）のため買い禁止" + Style.RESET_ALL)
+                                    # ここで以降の買い判定ロジックをスキップする場合はreturnやフラグで制御可能
+                                    # 例: return などで即時抜ける場合
+                                    return
+                        else:
+                            print(f"[DEBUG] 5分足インジケータ: 取得失敗または空")
+                    except Exception as e:
+                        print(f"[ERROR] run_bot例外: {e}")
+                        import traceback
+                        traceback.print_exc()
+        closes_15m = [float(r[4]) for r in ohlcv_15m if r and len(r) >= 5 and r[4] is not None]
+        price_now_15m = closes_15m[-1] if closes_15m else None
+        ema20_15m = talib.EMA(np.array(closes_15m), timeperiod=20)[-1] if len(closes_15m) >= 20 else None
+        ema30_15m = talib.EMA(np.array(closes_15m), timeperiod=30)[-1] if len(closes_15m) >= 30 else None
+        ema20_slope_15m = (ema20_15m - talib.EMA(np.array(closes_15m[:-3]), timeperiod=20)[-1]) / 3 if len(closes_15m) >= 23 else None
+        ema30_slope_15m = (ema30_15m - talib.EMA(np.array(closes_15m[:-3]), timeperiod=30)[-1]) / 3 if len(closes_15m) >= 33 else None
+        # 5分足データから15分相当のEMA（5分足EMA60=15分足EMA20, EMA90=15分足EMA30）
+        ohlcv_5m = exchange.fetch_ohlcv('BTC/JPY', timeframe='5m', limit=180)
+        closes_5m = [float(r[4]) for r in ohlcv_5m if r and len(r) >= 5 and r[4] is not None]
+        ema60_5m = talib.EMA(np.array(closes_5m), timeperiod=60)[-1] if len(closes_5m) >= 60 else None
+        ema90_5m = talib.EMA(np.array(closes_5m), timeperiod=90)[-1] if len(closes_5m) >= 90 else None
+        ema60_slope_5m = (ema60_5m - talib.EMA(np.array(closes_5m[:-3]), timeperiod=60)[-1]) / 3 if len(closes_5m) >= 63 else None
+        ema90_slope_5m = (ema90_5m - talib.EMA(np.array(closes_5m[:-3]), timeperiod=90)[-1]) / 3 if len(closes_5m) >= 93 else None
+        print_table([
+            ["15m足EMA20", ema20_15m],
+            ["15m足EMA20傾き", ema20_slope_15m],
+            ["15m足EMA30", ema30_15m],
+            ["15m足EMA30傾き", ema30_slope_15m],
+            ["15m足現在価格", price_now_15m],
+            ["5m足EMA60(15m相当)", ema60_5m],
+            ["5m足EMA60傾き", ema60_slope_5m],
+            ["5m足EMA90(15m相当)", ema90_5m],
+            ["5m足EMA90傾き", ema90_slope_5m]
+        ], headers=["項目", "値"], color=Fore.YELLOW)
+    except Exception as e:
+        print(f"[ERROR] run_bot: 15分足EMA判定エラー: {e}")
     try:
         # --- 5分足テーブル ---
         print("[DEBUG] run_bot: get_ohlcv呼び出し前")
-        df = get_ohlcv(exchange, 'BTC/JPY', timeframe='5m', limit=50)
+        df = get_ohlcv(exchange, 'BTC/JPY', timeframe='5m', limit=300)
         print(f"[DEBUG] 取得した5分足データ: ... total={len(df) if df is not None else 0}")
-        indicators_5m = compute_indicators(exchange, pair='BTC/JPY', timeframe='5m', limit=50, ohlcv_data=df)
+        indicators_5m = compute_indicators(exchange, pair='BTC/JPY', timeframe='5m', limit=300, ohlcv_data=df)
+        ema100_slope_5m = None
+        rsi_5m = None
+        closes_5m = []
         if indicators_5m:
-            print(f"[DEBUG] 5分足インジケータ: rsi_14={indicators_5m.get('rsi_14')}, closes本数={len(indicators_5m.get('closes', []))}")
             import math
-            rsi_5m = indicators_5m.get('rsi_14')
             closes_5m = indicators_5m.get('closes', [])
+            rsi_5m = indicators_5m.get('rsi_14')
             closes_5m_valid = [v for v in closes_5m if v is not None and not (isinstance(v, float) and math.isnan(v))]
             rsi_5m_disp = int(rsi_5m) if rsi_5m is not None and not (isinstance(rsi_5m, float) and math.isnan(rsi_5m)) else "データ不足"
             print_table([
@@ -539,8 +642,86 @@ def run_bot(exchange, fund_manager, dry_run=False):
                 ["5m足closes本数", len(closes_5m_valid)],
                 ["5m足closesサンプル", closes_5m_valid[:5] if closes_5m_valid else []]
             ], headers=["項目", "値"], color=Fore.CYAN)
-        else:
-            print(f"[DEBUG] 5分足インジケータ: 取得失敗または空")
+
+            # --- 5分足EMA100傾き率計算と厳格な買い禁止判定 ---
+            buy_candidate = False
+            if len(closes_5m) >= 103:
+                import numpy as np
+                import talib
+                ema100_now = float(talib.EMA(np.array(closes_5m), timeperiod=100)[-1])
+                ema100_prev = float(talib.EMA(np.array(closes_5m[:-3]), timeperiod=100)[-1])
+                ema100_slope_5m = (ema100_now - ema100_prev) / 3 / ema100_now  # 割合で傾き率
+                print(f"[DEBUG] 5m足EMA100傾き率: {ema100_slope_5m:.5f}")
+                price_now_5m = closes_5m[-1] if closes_5m else None
+                ema20_5m = float(talib.EMA(np.array(closes_5m), timeperiod=20)[-1]) if len(closes_5m) >= 20 else None
+                ema30_5m = float(talib.EMA(np.array(closes_5m), timeperiod=30)[-1]) if len(closes_5m) >= 30 else None
+                # BB下限
+                sma_5m = float(talib.SMA(np.array(closes_5m), timeperiod=20)[-1]) if len(closes_5m) >= 20 else None
+                std_5m = float(np.std(closes_5m[-20:])) if len(closes_5m) >= 20 else None
+                bb_lower_5m = sma_5m - 2 * std_5m if sma_5m is not None and std_5m is not None else None
+                bb_touch = price_now_5m is not None and bb_lower_5m is not None and price_now_5m <= bb_lower_5m * 1.01
+                rsi_entry = rsi_5m is not None and 35 <= rsi_5m <= 45
+
+                # 1. EMA100傾きが下なら買い禁止
+                if ema100_slope_5m < 0:
+                    print(Fore.MAGENTA + f"[INFO] 5分足EMA100傾き率がマイナス（{ema100_slope_5m*100:.3f}%）のため買い禁止" + Style.RESET_ALL)
+                    return
+                # 2. 価格がEMA100の下でもおしめ条件なら買い候補
+                if price_now_5m is not None and price_now_5m < ema100_now:
+                    if ((ema20_5m is not None and abs(price_now_5m - ema20_5m) < ema20_5m*0.01) or
+                        (ema30_5m is not None and abs(price_now_5m - ema30_5m) < ema30_5m*0.01)) and bb_touch and rsi_entry:
+                        buy_candidate = True
+                        print(Fore.GREEN + f"[INFO] 押し目条件成立: EMA20/30, BB下限, RSI35-45" + Style.RESET_ALL)
+                # 3. 価格がEMA100以上なら通常買い候補
+                elif price_now_5m is not None and price_now_5m >= ema100_now:
+                    ohlcv_15m = []  # 例外時も未定義参照を防ぐため先に初期化
+                    try:
+                        # --- 15分足テーブル ---
+                        ohlcv_15m = exchange.fetch_ohlcv('BTC/JPY', timeframe='15m', limit=50)
+                        total_15m = len(ohlcv_15m) if ohlcv_15m is not None else 0
+                        print(f"[DEBUG] 取得した15分足データ: ... total={total_15m}")
+                        if not ohlcv_15m or total_15m == 0:
+                            print("[WARN] 15分足データが取得できていません")
+                            rsi_15m_disp2 = "データ不足"
+                            closes_15m_sample = "データ不足"
+                            closes_15m_valid = []
+                        else:
+                            indicators_15m = compute_indicators(exchange, pair='BTC/JPY', timeframe='15m', limit=50, ohlcv_data=ohlcv_15m)
+                            import math
+                            rsi_15m = indicators_15m.get('rsi_14') if indicators_15m else None
+                            closes_15m = indicators_15m.get('closes', []) if indicators_15m else []
+                            closes_15m_valid = [v for v in closes_15m if v is not None and not (isinstance(v, float) and math.isnan(v))]
+                            if len(closes_15m_valid) >= 14 and rsi_15m is not None and not (isinstance(rsi_15m, float) and math.isnan(rsi_15m)):
+                                rsi_15m_disp2 = int(rsi_15m)
+                                closes_15m_sample = closes_15m_valid[:5] if closes_15m_valid else []
+                            else:
+                                print(f"[ERROR] 15分足データが15本未満です。RSI計算不可")
+                                rsi_15m_disp2 = "データ不足"
+                                closes_15m_sample = "データ不足"
+                        print_table([
+                            ["15m足RSI", rsi_15m_disp2],
+                            ["15m足closes本数", len(closes_15m_valid)],
+                            ["15m足closesサンプル", closes_15m_sample]
+                        ], headers=["項目", "値"], color=Fore.GREEN)
+                    except Exception as e:
+                        print(f"[ERROR] run_bot: 15分足EMA判定エラー: {e}")
+                        # 例外時もohlcv_15mを必ず初期化し、以降の参照でエラーにならないようにする
+                        ohlcv_15m = []
+                        closes_15m_valid = []
+                        closes_15m_sample = "データ不足"
+                        rsi_15m_disp2 = "データ不足"
+                        try:
+                            print_table([
+                                ["15m足RSI", rsi_15m_disp2],
+                                ["15m足closes本数", len(closes_15m_valid)],
+                                ["15m足closesサンプル", closes_15m_sample]
+                            ], headers=["項目", "値"], color=Fore.GREEN)
+                        except Exception as e2:
+                            print(f"[ERROR] 15分足テーブル出力エラー: {e2}")
+    except Exception as e:
+        print(f"[ERROR] run_bot例外: {e}")
+        import traceback
+        traceback.print_exc()
 
         # --- 15分足テーブル ---
         ohlcv_15m = exchange.fetch_ohlcv('BTC/JPY', timeframe='15m', limit=50)
@@ -570,12 +751,60 @@ def run_bot(exchange, fund_manager, dry_run=False):
             ["15m足closesサンプル", closes_15m_sample]
         ], headers=["項目", "値"], color=Fore.GREEN)
 
+    try:
         # --- シグナル判定 ---
         print("[DEBUG] run_bot: generate_signals呼び出し前")
-        signal, message = generate_signals(df)
+        ohlcv_1h = exchange.fetch_ohlcv('BTC/JPY', timeframe='1h', limit=300)
+        if not ohlcv_1h or len(ohlcv_1h) < 15:
+            print(f"[WARN] 1時間足OHLCVデータが{len(ohlcv_1h) if ohlcv_1h else 0}本しかありません。5分足から合成します")
+            ohlcv_5m = exchange.fetch_ohlcv('BTC/JPY', timeframe='5m', limit=300)
+            ohlcv_1h = resample_ohlcv_5m_to_1h(ohlcv_5m)
+            print(f"[DEBUG] 合成後の1時間足: {ohlcv_1h[:3]} ... total={len(ohlcv_1h)}")
+        # シグナル生成
+        df_1h = {'closes': [float(r[4]) for r in ohlcv_1h if r and len(r) >= 5 and r[4] is not None]}
+        signal, message = generate_signals(df_1h)
         print(f"[DEBUG] run_bot: シグナル={signal}, メッセージ={message}")
         sell_signal = signal == 'sell_all'
         print(f"[INFO] シグナル: {signal}, 理由: {message}")
+
+        # --- 買いシグナル時にメール通知 ---
+        if signal == 'buy':
+            send_notification(
+                smtp_host, smtp_port, smtp_user, smtp_password, to_email,
+                "【BTC自動売買】買いシグナル発生", f"買い時です！理由: {message}"
+            )
+            # 日本円残高取得
+            free_jpy = None
+            try:
+                balance = exchange.fetch_balance()
+                free_jpy = balance.get('free', {}).get('JPY', None)
+            except Exception as e:
+                print(f"[ERROR] JPY残高取得エラー: {e}")
+            # 85%でBTC購入
+            if free_jpy and price_now:
+                btc_amount = round((free_jpy * 0.85) / price_now, 8)
+                order_result = execute_order(exchange, 'BTC/JPY', 'buy', btc_amount, price_now)
+                if order_result and not order_result.get('error'):
+                    send_notification(
+                        smtp_host, smtp_port, smtp_user, smtp_password, to_email,
+                        "【BTC自動売買】買いました", f"BTCを購入しました。注文詳細: {order_result}"
+                    )
+        # --- 売りシグナル時はBTC全量売却 ---
+        if signal == 'sell_all':
+            # BTC残高取得
+            btc_balance = None
+            try:
+                balance = exchange.fetch_balance()
+                btc_balance = balance.get('free', {}).get('BTC', None)
+            except Exception as e:
+                print(f"[ERROR] BTC残高取得エラー: {e}")
+            if btc_balance and price_now:
+                order_result = execute_order(exchange, 'BTC/JPY', 'sell', btc_balance, price_now)
+                if order_result and not order_result.get('error'):
+                    send_notification(
+                        smtp_host, smtp_port, smtp_user, smtp_password, to_email,
+                        "【BTC自動売買】売りました", f"BTCを全量売却しました。注文詳細: {order_result}"
+                    )
     except Exception as e:
         print(f"[ERROR] run_bot例外: {e}")
         import traceback
@@ -690,7 +919,7 @@ def send_notification(smtp_host, smtp_port, smtp_user, smtp_password, to_email, 
 
     # --- 15分足インジケータ取得 ---
     try:
-        ohlcv_15m = exchange.fetch_ohlcv('BTC/JPY', timeframe='15m', limit=50)
+        ohlcv_15m = exchange.fetch_ohlcv('BTC/JPY', timeframe='15m', limit=300)
         total_15m = len(ohlcv_15m) if ohlcv_15m is not None else 0
         print(f"[DEBUG] 取得した15分足データ: ... total={total_15m}")
         if not ohlcv_15m or total_15m == 0:
@@ -879,41 +1108,45 @@ def send_notification(smtp_host, smtp_port, smtp_user, smtp_password, to_email, 
         if not can_counter_trade:
             print(f"[INFO] 1時間足で逆張り不可: RSI(前): {prev_rsi_1h}, RSI(最新): {latest_rsi_1h}", flush=True)
             time.sleep(30)
-            continue
-            # --- ループの最後で30秒待機 ---
-            time.sleep(30)
-        else:
-            print(f"[DEBUG] 1時間足逆張り判定OK: RSI(前): {prev_rsi_1h}, RSI(最新): {latest_rsi_1h}")
-
-        # --- 板情報・インジケータ取得 ---
-        try:
-            orderbook = exchange.fetch_order_book('BTC/JPY')
-            bids = orderbook.get('bids', [])
-            asks = orderbook.get('asks', [])
-            current_price = get_latest_price(exchange, 'BTC/JPY')
-            bids_near = [bid for bid in bids if abs(bid[0] - current_price) < current_price * 0.01]
-            asks_near = [ask for ask in asks if abs(ask[0] - current_price) < current_price * 0.01]
-            avg_bid_size = sum([b[1] for b in bids_near]) / len(bids_near) if bids_near else 0
-            avg_ask_size = sum([a[1] for a in asks_near]) / len(asks_near) if asks_near else 0
-
-            indicators = compute_indicators(exchange, pair='BTC/JPY', timeframe='5m', limit=1000)
-            rsi = indicators.get('rsi_14')
-            rsi_list = indicators.get('rsi_list', [])
-            bb_lower = None
-            bb_upper = None
             try:
-                closes = [float(pos['price']) for pos in positions] if positions else [current_price]
-                period = 14
-                if len(closes) >= period:
-                    sma = np.mean(closes[-period:])
-                    std = np.std(closes[-period:])
-                    bb_lower = sma - 2 * std
-                    bb_upper = sma + 2 * std
+                ohlcv_15m = exchange.fetch_ohlcv('BTC/JPY', timeframe='15m', limit=300)
+                total_15m = len(ohlcv_15m) if ohlcv_15m is not None else 0
+                print(f"[DEBUG] 取得した15分足データ: ... total={total_15m}")
+                if not ohlcv_15m or total_15m < 15:
+                    print("[WARN] 15分足データが15本未満です。5分足から合成します")
+                    ohlcv_5m = exchange.fetch_ohlcv('BTC/JPY', timeframe='5m', limit=300)
+                    ohlcv_15m = resample_ohlcv_5m_to_15m(ohlcv_5m)
+                    total_15m = len(ohlcv_15m) if ohlcv_15m is not None else 0
+                    print(f"[DEBUG] 合成後の15分足: {ohlcv_15m[:3]} ... total={total_15m}")
+                if not ohlcv_15m or total_15m == 0:
+                    rsi_15m_disp2 = "データ不足"
+                    closes_15m_sample = "データ不足"
+                    closes_15m_valid = []
+                else:
+                    indicators_15m = compute_indicators(exchange, pair='BTC/JPY', timeframe='15m', limit=50, ohlcv_data=ohlcv_15m)
+                    import math
+                    rsi_15m = indicators_15m.get('rsi_14') if indicators_15m else None
+                    closes_15m = indicators_15m.get('closes', []) if indicators_15m else []
+                    closes_15m_valid = [v for v in closes_15m if v is not None and not (isinstance(v, float) and math.isnan(v))]
+                    if len(closes_15m_valid) >= 14 and rsi_15m is not None and not (isinstance(rsi_15m, float) and math.isnan(rsi_15m)):
+                        rsi_15m_disp2 = int(rsi_15m)
+                        closes_15m_sample = closes_15m_valid[:5] if closes_15m_valid else []
+                    else:
+                        print(f"[ERROR] 15分足データが15本未満です。RSI計算不可")
+                        rsi_15m_disp2 = "データ不足"
+                        closes_15m_sample = "データ不足"
+                # --- RSI反発ロジック ---
+                rsi_list = []
             except Exception:
                 bb_lower = None
                 bb_upper = None
+            # --- 5分足RSIリスト生成 ---
+            rsi_list = []
+            if indicators and 'rsi_list' in indicators:
+                rsi_list = indicators['rsi_list']
+            elif indicators and 'rsi_14_list' in indicators:
+                rsi_list = indicators['rsi_14_list']
 
-            # --- RSI反発ロジック ---
             rsi_buy_signal = False
             prev_rsi = None
             latest_rsi = None
@@ -950,12 +1183,28 @@ def send_notification(smtp_host, smtp_port, smtp_user, smtp_password, to_email, 
                 entry_price = float(positions[0].get('price', 0))
             trailing_high = None
             try:
-                closes_5m = [float(r[4]) for r in exchange.fetch_ohlcv('BTC/JPY', timeframe='5m', limit=20)]
+                closes_5m = [float(r[4]) for r in exchange.fetch_ohlcv('BTC/JPY', timeframe='5m', limit=300)]
                 trailing_high = max(closes_5m) if closes_5m else None
             except Exception:
                 trailing_high = None
             trailing_sell = False
             trailing_reason = ""
+            # --- 価格・インジケータ取得 ---
+            current_price = get_latest_price(exchange, PAIR)
+            indicators = compute_indicators(exchange, pair=PAIR, timeframe='5m', limit=1000)
+            rsi = indicators.get('rsi_14') if indicators else None
+            bb_upper = None
+            try:
+                closes = [float(pos['price']) for pos in positions] if positions else [current_price]
+                import numpy as np
+                period = 14
+                if len(closes) >= period:
+                    sma = np.mean(closes[-period:])
+                    std = np.std(closes[-period:])
+                    bb_upper = sma + 2 * std
+            except Exception:
+                bb_upper = None
+
             if entry_price and trailing_high:
                 if current_price >= entry_price * (1 + trailing_start_pct):
                     trigger_price = trailing_high * (1 - trailing_width_pct)
@@ -988,13 +1237,6 @@ def send_notification(smtp_host, smtp_port, smtp_user, smtp_password, to_email, 
                         send_notification(smtp_host, smtp_port, smtp_user, smtp_password, to_email, subject, message)
                 except Exception as e:
                     print(f"⚠️ 売りシグナルメール送信エラー: {e}")
-            # 厚い板ロジック削除
-            # 板が薄い場合（買い板・売り板とも平均の半分以下）
-            nampin_interval = 0.10
-            if (avg_bid_size < 0.5 * (sum([b[1] for b in bids]) / len(bids) if bids else 1)) and (avg_ask_size < 0.5 * (sum([a[1] for a in asks]) / len(asks) if asks else 1)):
-                nampin_interval = 0.20
-        except Exception as e:
-            print(f"⚠️ 板情報取得・判定エラー: {e}")
         time.sleep(30)
 
         # --- positions_state.jsonの再読込・保存・売買判定・注文・通知ロジックをここで統合 ---
@@ -2761,9 +3003,50 @@ def run_bot(exchange, fund_manager, dry_run=False):
                 current_price = get_latest_price(exchange, 'BTC/JPY')
                 logging.info(f"現在価格: {current_price}")
                 print(f"[DEBUG] 現在価格: {current_price}", flush=True)
+                # --- 5分足EMA100傾き率による買い禁止判定 ---
+                indicators_5m = compute_indicators(exchange, pair='BTC/JPY', timeframe='5m', limit=300)
+                ema100_slope_5m = None
+                closes_5m = indicators_5m.get('closes', []) if indicators_5m else []
+                if closes_5m and len(closes_5m) >= 103:
+                    import numpy as np
+                    import talib
+                    ema100_now = float(talib.EMA(np.array(closes_5m), timeperiod=100)[-1])
+                    ema100_prev = float(talib.EMA(np.array(closes_5m[:-3]), timeperiod=100)[-1])
+                    ema100_slope_5m = (ema100_now - ema100_prev) / 3 / ema100_now
+                    print(f"[DEBUG] 5m足EMA100傾き率: {ema100_slope_5m:.5f}")
+                    if ema100_slope_5m < -0.0015:
+                        print(Fore.RED + f"[INFO] 5分足EMA100傾き率が-0.15%未満（{ema100_slope_5m*100:.3f}%）のため買い禁止" + Style.RESET_ALL)
+                        # 買い判定をスキップ
+                        continue
+
+                # --- 5分足RSIで最終エントリー判定 ---
+                indicators_5m = compute_indicators(exchange, pair='BTC/JPY', timeframe='5m', limit=300)
+                rsi_5m = indicators_5m.get('rsi_14') if indicators_5m else None
+                closes_5m = indicators_5m.get('closes', []) if indicators_5m else []
+                ema20_5m = None
+                ema100_5m = None
+                ema100_slope_5m = None
+                if closes_5m and len(closes_5m) >= 103:
+                    import numpy as np
+                    import talib
+                    ema20_5m = float(talib.EMA(np.array(closes_5m), timeperiod=20)[-1])
+                    ema100_5m = float(talib.EMA(np.array(closes_5m), timeperiod=100)[-1])
+                    ema100_prev = float(talib.EMA(np.array(closes_5m[:-3]), timeperiod=100)[-1])
+                    ema100_slope_5m = (ema100_5m - ema100_prev) / 3 / ema100_5m
+                print(f"[DEBUG] 5分足RSI: {rsi_5m}, EMA20: {ema20_5m}, EMA100: {ema100_5m}, EMA100傾き率: {ema100_slope_5m}")
                 # 売買判定
                 btc_balance = sum([float(pos.get('amount', 0)) for pos in positions])
-                td = trade_decision(current_price, btc_balance, MIN_ORDER_BTC, last_buy_price)
+                # 5分足RSIが35～45ゾーン かつ 価格>EMA20 かつ EMA100傾き率>-0.15% でbuy
+                buy_signal = False
+                if btc_balance == 0 and rsi_5m is not None and 35 <= rsi_5m <= 45:
+                    if closes_5m and len(closes_5m) > 0 and ema20_5m is not None and ema100_slope_5m is not None:
+                        price_now = closes_5m[-1]
+                        if price_now > ema20_5m and ema100_slope_5m > -0.0015:
+                            buy_signal = True
+                if buy_signal:
+                    td = {'action': 'buy', 'amount': MIN_ORDER_BTC, 'price': current_price, 'buy_condition': True}
+                else:
+                    td = {'action': 'hold', 'amount': 0.0, 'price': current_price, 'buy_condition': False}
                 print(f"[DEBUG] trade_decision result: {td}", flush=True)
                 if td.get('action') == 'sell':
                     print("[DEBUG] 売り判定: 条件成立", flush=True)
@@ -2785,8 +3068,12 @@ def run_bot(exchange, fund_manager, dry_run=False):
                         print("[DEBUG] 売却後、ポジション情報クリア・保存", flush=True)
                     except Exception as e:
                         print(f"[ERROR] 売却処理例外: {e}", flush=True)
+                elif td.get('action') == 'buy':
+                    print("[DEBUG] 買い判定: 5分足RSI<=35でエントリー", flush=True)
+                    # ここで買い注文ロジックを実行（既存のbuyロジックを流用）
+                    # ...既存のbuyロジック...
                 else:
-                    print("[DEBUG] 売り判定: 条件不成立", flush=True)
+                    print("[DEBUG] 買い判定: 条件不成立（5分足RSIフィルタ）", flush=True)
             except Exception as e:
                 logging.error(f"positionsファイル読み込み例外: {e}")
                 print(f"[ERROR] positionsファイル読み込み例外: {e}", flush=True)
