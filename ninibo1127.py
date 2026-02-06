@@ -1,3 +1,210 @@
+# --- .envファイルから環境変数を自動ロード ---
+from dotenv import load_dotenv
+load_dotenv()
+# --- bitbank用ccxtインスタンス生成 ---
+import ccxt
+import os
+import json
+def create_bitbank_exchange():
+    api_key = os.getenv('BITBANK_API_KEY')
+    api_secret = os.getenv('BITBANK_API_SECRET')
+    exchange = ccxt.bitbank({
+        'apiKey': api_key,
+        'secret': api_secret,
+        'enableRateLimit': True,
+    })
+    return exchange
+
+# --- 取引所APIから売買履歴を取得してtrade_history.jsonに記録 ---
+def fetch_and_save_trade_history(exchange, pair='BTC/JPY', limit=100):
+    try:
+        trades = exchange.fetch_my_trades(pair, limit=limit)
+        trade_log_file = os.path.abspath(os.path.join(os.path.dirname(__file__), 'trade_history.json'))
+        logs = []
+        if os.path.exists(trade_log_file):
+            with open(trade_log_file, 'r', encoding='utf-8') as f:
+                logs = json.load(f)
+        for t in trades:
+            log_entry = {
+                'datetime': t.get('datetime'),
+                'symbol': t.get('symbol'),
+                'side': t.get('side'),
+                'price': t.get('price'),
+                'amount': t.get('amount'),
+                'cost': t.get('cost'),
+                'fee': t.get('fee'),
+                'order': t.get('order'),
+                'id': t.get('id'),
+                'status': t.get('status', 'filled'),
+                'info': t.get('info'),
+            }
+            logs.append(log_entry)
+        with open(trade_log_file, 'w', encoding='utf-8') as f:
+            json.dump(logs, f, ensure_ascii=False, indent=2)
+        print(f"[INFO] {len(trades)}件の履歴をtrade_history.jsonに記録しました")
+    except Exception as e:
+        print(f"[ERROR] 売買履歴取得・記録エラー: {e}")
+# --- プログラム起動時に自動で履歴取得・記録 ---
+if __name__ == '__main__':
+    try:
+        exchange = create_bitbank_exchange()
+        fetch_and_save_trade_history(exchange, pair='BTC/JPY', limit=100)
+    except Exception as e:
+        print(f'[ERROR] 履歴自動取得エラー: {e}')
+# --- 取引所APIから売買履歴を取得してtrade_history.jsonに記録する ---
+import ccxt
+import os
+import json
+def fetch_and_save_trade_history(exchange, pair='BTC/JPY', limit=100):
+    try:
+        trades = exchange.fetch_my_trades(pair, limit=limit)
+        trade_log_file = os.path.abspath(os.path.join(os.path.dirname(__file__), 'trade_history.json'))
+        logs = []
+        if os.path.exists(trade_log_file):
+            with open(trade_log_file, 'r', encoding='utf-8') as f:
+                logs = json.load(f)
+        for t in trades:
+            log_entry = {
+                'datetime': t.get('datetime'),
+                'symbol': t.get('symbol'),
+                'side': t.get('side'),
+                'price': t.get('price'),
+                'amount': t.get('amount'),
+                'cost': t.get('cost'),
+                'fee': t.get('fee'),
+                'order': t.get('order'),
+                'id': t.get('id'),
+                'status': t.get('status', 'filled'),
+                'info': t.get('info'),
+            }
+            logs.append(log_entry)
+        with open(trade_log_file, 'w', encoding='utf-8') as f:
+            json.dump(logs, f, ensure_ascii=False, indent=2)
+        print(f"[INFO] {len(trades)}件の履歴をtrade_history.jsonに記録しました")
+    except Exception as e:
+        print(f"[ERROR] 売買履歴取得・記録エラー: {e}")
+# --- WebSocketで板情報・出来高を取得する実用サンプル ---
+import threading
+import websocket
+import json
+
+orderbook_data = None  # 板情報
+volume_data = None     # 出来高
+
+def on_ws_message_depth(ws, message):
+    global orderbook_data, volume_data
+    try:
+        # Socket.IO '40'（connect）受信時に購読リクエストを送信
+        if message == '40':
+            subscribe_msg = '42["subscribe", {"channel": "depth_btc_jpy"}]'
+            ws.send(subscribe_msg)
+            print("[WebSocket] depth_btc_jpy購読リクエスト送信")
+            return
+        msg = message
+        if len(msg) > 1 and msg[0].isdigit() and msg[1] == '{':
+            msg = msg[1:]
+        if msg.startswith('42'):
+            try:
+                arr = json.loads(msg[2:])
+                if isinstance(arr, list) and len(arr) == 2 and arr[0] == 'depth_btc_jpy':
+                    data = arr[1]
+                    orderbook_data = data
+                    print(f"[板情報] {orderbook_data}")
+                    # 板情報から出来高推定（例: ask/bidの合計量）
+                    volume_data = sum([float(v[1]) for v in data.get('asks', [])]) + sum([float(v[1]) for v in data.get('bids', [])])
+                    print(f"[推定出来高] {volume_data}")
+                return
+            except Exception as e:
+                print(f"[WebSocket ERROR] depthパース失敗: {e}")
+                return
+        try:
+            data = json.loads(msg)
+            if isinstance(data, dict) and data.get('channel') == 'depth_btc_jpy':
+                orderbook_data = data['data']
+                print(f"[板情報] {orderbook_data}")
+        except Exception as e:
+            print(f"[WebSocket ERROR] JSONパース失敗: {e}")
+    except Exception as e:
+        print(f"[WebSocket ERROR] {e}")
+
+def start_bitbank_ws_depth():
+    while True:
+        try:
+            ws_url = "wss://stream.bitbank.cc/socket.io/?EIO=3&transport=websocket"
+            ws = websocket.WebSocketApp(
+                ws_url,
+                on_message=on_ws_message_depth
+            )
+            ws.run_forever()
+        except Exception as e:
+            print(f"[ERROR] WebSocket再接続エラー: {e}")
+        print("[INFO] 5秒後にWebSocket再接続します")
+        import time
+        time.sleep(5)
+# --- WebSocketでbitbankの現在価格を取得 ---
+import threading
+import websocket
+import json
+
+latest_ws_price = None  # グローバルで最新価格を保持
+
+def on_ws_message(ws, message):
+    global latest_ws_price
+    try:
+        print(f"[WebSocket RAW] {repr(message)}")
+        # Socket.IO '40'（connect）受信時に購読リクエストを送信
+        if message == '40':
+            subscribe_msg = '42["subscribe", {"channel": "ticker_btc_jpy"}]'
+            ws.send(subscribe_msg)
+            print("[WebSocket] ticker_btc_jpy購読リクエスト送信")
+            return
+        # Socket.IOプロトコル: 先頭が数字+JSONの場合の前処理
+        msg = message
+        if len(msg) > 1 and msg[0].isdigit() and msg[1] == '{':
+            msg = msg[1:]
+        # 先頭が'42'（Socket.IOのeventメッセージ）なら配列形式
+        if msg.startswith('42'):
+            try:
+                arr = json.loads(msg[2:])
+                print(f"[WebSocket PARSED] {repr(arr)}")
+                # ['channel', {...}] の形式
+                if isinstance(arr, list) and len(arr) == 2 and arr[0] == 'ticker_btc_jpy':
+                    data = arr[1]
+                    latest_ws_price = float(data['last'])
+                    print(f"[WebSocket] 現在価格: {latest_ws_price}")
+                return
+            except Exception as e:
+                print(f"[WebSocket ERROR] 42パース失敗: {e}")
+                return
+        # 通常のJSONとしてパース
+        try:
+            data = json.loads(msg)
+            print(f"[WebSocket PARSED] {repr(data)}")
+            if isinstance(data, dict) and data.get('channel') == 'ticker_btc_jpy':
+                latest_ws_price = float(data['data']['last'])
+                print(f"[WebSocket] 現在価格: {latest_ws_price}")
+            else:
+                print(f"[WebSocket INFO] 受信データはdict型でない、またはchannelが一致しません: {type(data)}")
+        except Exception as e:
+            print(f"[WebSocket ERROR] JSONパース失敗: {e}")
+    except Exception as e:
+        print(f"[WebSocket ERROR] {e}")
+
+
+def start_bitbank_ws():
+    while True:
+        try:
+            ws_url = "wss://stream.bitbank.cc/socket.io/?EIO=3&transport=websocket"
+            ws = websocket.WebSocketApp(
+                ws_url,
+                on_message=on_ws_message
+            )
+            ws.run_forever()
+        except Exception as e:
+            print(f"[ERROR] WebSocket再接続エラー: {e}")
+        print("[INFO] 5秒後にWebSocket再接続します")
+        time.sleep(5)
+
 def get_account_balance(exchange):
     """
     ccxtのfetch_balanceをラップし、{'total': {...}, 'free': {...}, 'used': {...}}形式で返す。
@@ -15,193 +222,7 @@ def get_account_balance(exchange):
         import logging
         logging.error(f"get_account_balance失敗: {e}")
         return {'total': {}, 'free': {}, 'used': {}}
-def print_5m_table(exchange):
-    import numpy as np
-    import talib
-    from colorama import Fore
-    try:
-        ohlcv_5m = exchange.fetch_ohlcv('BTC/JPY', timeframe='5m', limit=686)
-        closes_5m = [float(r[4]) for r in ohlcv_5m if r and len(r) >= 5 and r[4] is not None]
-    except Exception as e:
-        print(f"[ERROR] 5分足データ取得エラー: {e}")
-        closes_5m = []
-    ema488_5m = ema494_5m = ema405_5m = ema660_5m = None
-    price_now = closes_5m[-1] if closes_5m else None
-    if closes_5m and len(closes_5m) >= 488:
-        ema488_5m = float(talib.EMA(np.array(closes_5m), timeperiod=488)[-1])
-    if closes_5m and len(closes_5m) >= 494:
-        ema494_5m = float(talib.EMA(np.array(closes_5m), timeperiod=494)[-1])
-    if closes_5m and len(closes_5m) >= 405:
-        ema405_5m = float(talib.EMA(np.array(closes_5m), timeperiod=405)[-1])
-    if closes_5m and len(closes_5m) >= 660:
-        ema660_5m = float(talib.EMA(np.array(closes_5m), timeperiod=660)[-1])
-    def trend_mark(val):
-        if val is None:
-            return "?"
-        if val > 0.001:
-            return "↑◎"
-        elif val > 0:
-            return "↑○"
-        elif val < -0.001:
-            return "↓✖"
-        elif val < 0:
-            return "↓△"
-        else:
-            return "→"
-    def compare_mark(price, ema):
-        if price is None or ema is None:
-            return "?"
-        diff = price - ema
-        if diff > ema * 0.002:
-            return "◎上"
-        elif diff > 0:
-            return "○上"
-        elif diff < -ema * 0.002:
-            return "✖下"
-        else:
-            return "△下"
-    ema_table = []
-    ema_table.append(["5m足現在価格", price_now if price_now is not None else "データ不足"])
-    ema_table.append(["5m足EMA488", ema488_5m if ema488_5m is not None else "データ不足"])
-    ema_table.append(["5m足EMA660", ema660_5m if ema660_5m is not None else "データ不足"])
-    ema_table.append(["5m足: 現在価格vsEMA488", compare_mark(price_now, ema488_5m)])
-    ema_table.append(["5m足: 現在価格vsEMA660", compare_mark(price_now, ema660_5m)])
-    ema488_5m_slope = None
-    ema660_5m_slope = None
-    if closes_5m and len(closes_5m) >= 491 and ema488_5m is not None:
-        ema488_5m_3ago = float(talib.EMA(np.array(closes_5m[:-3]), timeperiod=488)[-1])
-        ema488_5m_slope = (ema488_5m - ema488_5m_3ago) / 3 / ema488_5m
-    if closes_5m and len(closes_5m) >= 663 and ema660_5m is not None:
-        ema660_5m_3ago = float(talib.EMA(np.array(closes_5m[:-3]), timeperiod=660)[-1])
-        ema660_5m_slope = (ema660_5m - ema660_5m_3ago) / 3 / ema660_5m
-    ema_table.append(["5m足EMA488傾き", f"{ema488_5m_slope*100:.3f}% {trend_mark(ema488_5m_slope)}" if ema488_5m_slope is not None else "データ不足"])
-    ema_table.append(["5m足EMA660傾き", f"{ema660_5m_slope*100:.3f}% {trend_mark(ema660_5m_slope)}" if ema660_5m_slope is not None else "データ不足"])
-    print_table(ema_table, headers=["5分足主要比較", "値/判定"], color=Fore.YELLOW)
 
-def print_1h_table(exchange):
-    import numpy as np
-    import talib
-    from colorama import Fore, Style
-    print(Fore.MAGENTA + "[DEBUG] ==== 1時間足テーブル出力開始 ====" + Style.RESET_ALL, flush=True)
-    def trend_mark(val):
-        if val is None:
-            return "?"
-        if val > 0.001:
-            return "↑◎"
-        elif val > 0:
-            return "↑○"
-        elif val < -0.001:
-            return "↓✖"
-        elif val < 0:
-            return "↓△"
-        else:
-            return "→"
-    def compare_mark(price, ema):
-        if price is None or ema is None:
-            return "?"
-        diff = price - ema
-        if diff > ema * 0.002:
-            return "◎上"
-        elif diff > 0:
-            return "○上"
-        elif diff < -ema * 0.002:
-            return "✖下"
-        else:
-            return "△下"
-    try:
-        ohlcv_1h = exchange.fetch_ohlcv('BTC/JPY', timeframe='1h', limit=300)
-        if not ohlcv_1h or len(ohlcv_1h) < 15:
-            ohlcv_5m = exchange.fetch_ohlcv('BTC/JPY', timeframe='5m', limit=300)
-            ohlcv_1h = resample_ohlcv_5m_to_1h(ohlcv_5m)
-        closes_1h = [float(r[4]) for r in ohlcv_1h if r and len(r) >= 5 and r[4] is not None]
-        if len(closes_1h) >= 103:
-            price_1h = closes_1h[-1]
-            ema100_1h = float(talib.EMA(np.array(closes_1h), timeperiod=100)[-1])
-            ema100_prev = float(talib.EMA(np.array(closes_1h[:-3]), timeperiod=100)[-1])
-            ema100_slope = (ema100_1h - ema100_prev) / 3 / ema100_1h
-            sma_1h = float(talib.SMA(np.array(closes_1h), timeperiod=20)[-1])
-            std_1h = float(np.std(closes_1h[-20:]))
-            bb_upper_1h = sma_1h + 2 * std_1h
-            bb_lower_1h = sma_1h - 2 * std_1h
-            dist_to_bb_upper = bb_upper_1h - price_1h
-            dist_to_bb_lower = price_1h - bb_lower_1h
-            rsi_1h = float(talib.RSI(np.array(closes_1h), timeperiod=14)[-1]) if len(closes_1h) >= 15 else None
-            table_1h = [
-                ["1h足現在価格", price_1h],
-                ["1h足EMA100", ema100_1h],
-                ["1h足: 現在価格vsEMA100", compare_mark(price_1h, ema100_1h)],
-                ["1h足EMA100傾き率", f"{ema100_slope*100:.3f}% {trend_mark(ema100_slope)}"],
-                ["1h足RSI", rsi_1h],
-                ["1h足BB上限", bb_upper_1h],
-                ["1h足BB下限", bb_lower_1h],
-                ["BB上まで", dist_to_bb_upper],
-                ["BB下まで", dist_to_bb_lower],
-            ]
-            print_table(table_1h, headers=["1時間足", "値/判定"], color=Fore.YELLOW)
-    except Exception as e:
-        print(Fore.MAGENTA + f"[ERROR] 1時間足主要比較テーブル出力エラー: {e}" + Style.RESET_ALL)
-    print(Fore.MAGENTA + "[DEBUG] ==== 1時間足テーブル出力終了 ====" + Style.RESET_ALL, flush=True)
-def print_15m_table(exchange):
-    from colorama import Fore, Style
-    print(Fore.MAGENTA + "[DEBUG] ==== 15分足テーブル出力開始 ====" + Style.RESET_ALL, flush=True)
-    try:
-        ohlcv_15m = exchange.fetch_ohlcv('BTC/JPY', timeframe='15m', limit=300)
-        if not ohlcv_15m or len(ohlcv_15m) < 33:
-            ohlcv_5m = exchange.fetch_ohlcv('BTC/JPY', timeframe='5m', limit=300)
-            ohlcv_15m = resample_ohlcv_5m_to_15m(ohlcv_5m)
-        closes_15m = [float(r[4]) for r in ohlcv_15m if r and len(r) >= 5 and r[4] is not None]
-        price_15m = closes_15m[-1] if closes_15m else None
-        ema20_15m = ema30_15m = ema20_15m_slope = ema30_15m_slope = None
-        if len(closes_15m) >= 33:
-            import numpy as np
-            import talib
-            ema20_15m = float(talib.EMA(np.array(closes_15m), timeperiod=20)[-1])
-            ema30_15m = float(talib.EMA(np.array(closes_15m), timeperiod=30)[-1])
-            ema20_15m_3ago = float(talib.EMA(np.array(closes_15m[:-3]), timeperiod=20)[-1])
-            ema30_15m_3ago = float(talib.EMA(np.array(closes_15m[:-3]), timeperiod=30)[-1])
-            ema20_15m_slope = (ema20_15m - ema20_15m_3ago) / 3 / ema20_15m
-            ema30_15m_slope = (ema30_15m - ema30_15m_3ago) / 3 / ema30_15m
-        def trend_mark(val):
-            if val is None:
-                return "?"
-            if val > 0.001:
-                return "↑◎"
-            elif val > 0:
-                return "↑○"
-            elif val < -0.001:
-                return "↓✖"
-            elif val < 0:
-                return "↓△"
-            else:
-                return "→"
-        def compare_mark(price, ema):
-            if price is None or ema is None:
-                return "?"
-            diff = price - ema
-            if diff > ema * 0.002:
-                return "◎上"
-            elif diff > 0:
-                return "○上"
-            elif diff < -ema * 0.002:
-                return "✖下"
-            else:
-                return "△下"
-        table_15m = [
-            ["15m足現在価格", price_15m if price_15m is not None else "データ不足"],
-            ["15m足EMA20", ema20_15m if ema20_15m is not None else "データ不足"],
-            ["15m足EMA30", ema30_15m if ema30_15m is not None else "データ不足"],
-            ["15m足: 現在価格vsEMA20", compare_mark(price_15m, ema20_15m)],
-            ["15m足: 現在価格vsEMA30", compare_mark(price_15m, ema30_15m)],
-            ["15m足EMA20傾き", f"{ema20_15m_slope*100:.3f}% {trend_mark(ema20_15m_slope)}" if ema20_15m_slope is not None else "データ不足"],
-            ["15m足EMA30傾き", f"{ema30_15m_slope*100:.3f}% {trend_mark(ema30_15m_slope)}" if ema30_15m_slope is not None else "データ不足"],
-        ]
-        print_table(table_15m, headers=["15分足主要比較", "値/判定"], color=Fore.GREEN)
-    except Exception as e:
-        import traceback
-        print(f"[ERROR] 15分足主要比較テーブル出力エラー: {e}")
-        traceback.print_exc()
-    from colorama import Fore, Style
-    print(Fore.MAGENTA + "[DEBUG] ==== 15分足テーブル出力終了 ====" + Style.RESET_ALL, flush=True)
 from colorama import init as colorama_init
 colorama_init(autoreset=True)
 # --- シグナル生成のダミー関数 ---
@@ -209,13 +230,11 @@ def generate_signals(df):
     # 本番用: RSIとトレンドを考慮したシグナル生成
     rsi = None
     closes = None
-    if isinstance(df, dict):
-        rsi_list = df.get('rsi_list')
-        closes = df.get('closes')
-        if rsi_list and len(rsi_list) > 0:
-            rsi = rsi_list[-1]
-    elif hasattr(df, 'columns') and 'rsi' in df.columns:
-        rsi = df['rsi'].iloc[-1]
+    if isinstance(df, dict) and 'rsi_list' in df and 'closes' in df:
+        rsi = df['rsi_list'][-1] if df['rsi_list'] else None
+        closes = df['closes']
+    elif hasattr(df, 'columns') and 'rsi' in df.columns and 'close' in df.columns:
+        rsi = df['rsi'].iloc[-1] if not df['rsi'].isnull().all() else None
         closes = df['close'].tolist() if 'close' in df.columns else None
 
     # トレンド判定（例: 直近5本の終値で上昇/下降判定）
@@ -253,14 +272,6 @@ import pytz
 JST = pytz.timezone('Asia/Tokyo')
 
 # --- 表形式でデータを表示するユーティリティ ---
-def print_table(rows, headers=None, color=None):
-    from tabulate import tabulate
-    from colorama import Fore, Style
-    table = tabulate(rows, headers=headers, tablefmt="simple")
-    if color:
-        print(color + table + Style.RESET_ALL)
-    else:
-        print(table)
 # --- 5分足OHLCVを1時間足にリサンプリング ---
 def resample_ohlcv_5m_to_1h(ohlcv_5m):
     import pandas as pd
@@ -343,13 +354,15 @@ def calc_ema_slope(closes, period=20, span=3):
         # 本番運用: exchangeがNoneなら即エラー
         if exchange is None:
             raise RuntimeError("本番APIインスタンスが作成できませんでした。APIキー・シークレット・.env設定を再確認してください。")
-        trade_log_file = 'trade_history.json'
+        import os
+        trade_log_file = os.path.abspath(os.path.join(os.path.dirname(__file__), 'trade_history.json'))
 
         def log_trade(action, price, amount, status, reason=None):
             import json, datetime
             # 約定（filled/closed）のみ記録
             if status not in ("closed", "filled"):
                 return
+            print(f"[DEBUG] trade_history.json保存先: {trade_log_file}")
             log_entry = {
                 'action': action,
                 'price': price,
@@ -473,19 +486,21 @@ def create_bitbank_exchange():
 
 
 def run_bot(exchange, fund_manager, dry_run=False):
+    # --- リアルタイム価格の履歴を保持するリスト ---
+    import numpy as np
+    from collections import deque
+    price_history = deque(maxlen=300)
+    RSI_PERIOD = 14
+    rsi_buy_flag = False
+    import time
     PAIR = 'BTC/JPY'
-    PROFIT_TAKE_PCT = 10.0
-    BUY_MORE_PCT = 10.0
     MIN_ORDER_BTC = 0.001
     import json
-    import time
-    positions_file = 'positions_state.json'  # ファイル名を必ず固定
-    # ポジション情報とlast_buy_priceの読み込み
+    positions_file = 'positions_state.json'
     state = {}
     positions = []
     last_buy_price = None
     if os.path.exists(positions_file):
-        print("[DEBUG] run_bot: tryブロック突入", flush=True)
         try:
             with open(positions_file, 'r', encoding='utf-8') as f:
                 loaded = json.load(f)
@@ -495,417 +510,87 @@ def run_bot(exchange, fund_manager, dry_run=False):
             elif isinstance(loaded, list):
                 positions = loaded
                 last_buy_price = positions[-1]['price'] if positions else None
-            set_last_buy_price(state, last_buy_price)
-        except Exception as e:
-            print(f"[ERROR] positionsファイル初期読込例外: {e}", flush=True)
+        except Exception:
             positions = []
-            set_last_buy_price(state, None)
     else:
         positions = []
-        set_last_buy_price(state, None)
-    # --- クールダウン用: 最終買い注文時刻 ---
     last_buy_time = None
-    COOLDOWN_SECONDS = 60 * 10  # 10分間クールダウン（必要に応じて調整）
-    try:
-        print("[DEBUG] run_bot: while True直前", flush=True)
-        while True:
-            print("[DEBUG] run_bot: print_15m_table呼び出し直前", flush=True)
-            print_15m_table(exchange)
-            print_5m_table(exchange)
-            print_1h_table(exchange)
-            print("[DEBUG] run_bot: 15m/5m/1hテーブル出力直後", flush=True)
-            # 5分足判定のINFOログを色付きでprint
-            try:
-                indicators_5m = compute_indicators(exchange, pair='BTC/JPY', timeframe='5m', limit=300)
-                rsi_5m = indicators_5m.get('rsi_14') if indicators_5m else None
-                closes_5m = indicators_5m.get('closes', []) if indicators_5m else []
-                ema20_5m = None
-                ema100_5m = None
-                ema100_slope_5m = None
-                if closes_5m and len(closes_5m) >= 103:
-                    import numpy as np
-                    import talib
-                    ema20_5m = float(talib.EMA(np.array(closes_5m), timeperiod=20)[-1])
-                    ema100_5m = float(talib.EMA(np.array(closes_5m), timeperiod=100)[-1])
-                    ema100_prev = float(talib.EMA(np.array(closes_5m[:-3]), timeperiod=100)[-1])
-                    ema100_slope_5m = (ema100_5m - ema100_prev) / 3 / ema100_5m
-                info_msg = f"[INFO] 5分足RSI: {rsi_5m}, EMA20: {ema20_5m}, EMA100: {ema100_5m}, EMA100傾き率: {ema100_slope_5m}"
-                from colorama import Fore, Style
-                print(Fore.YELLOW + info_msg + Style.RESET_ALL)
-            except Exception as e:
-                print(f"[INFO] 判定情報出力エラー: {e}")
-            # positions_state.json再読込
-            try:
-                with open(positions_file, 'r', encoding='utf-8') as f:
-                    loaded = json.load(f)
-                if isinstance(loaded, dict):
-                    positions = loaded.get('positions', [])
-                    last_buy_price = loaded.get('last_buy_price')
-                elif isinstance(loaded, list):
-                    positions = loaded
-                    last_buy_price = positions[-1]['price'] if positions else None
-                set_last_buy_price(state, last_buy_price)
-                logging.info(f"positions読み込み直後: {positions}")
-                logging.debug(f"last_buy_price: {last_buy_price}")
-                # ここでAPI残高取得
-                try:
-                    api_balance = get_account_balance(exchange)
-                    logging.debug(f"API残高: {api_balance}")
-                    btc = api_balance.get('free', {}).get('BTC', 0)
-                    jpy = api_balance.get('free', {}).get('JPY', 0)
-                    logging.info(f"API残高: BTC={btc}, JPY={jpy}")
-                except Exception as e:
-                    logging.error(f"API残高取得エラー: {e}")
-                    api_balance = {'total': {}, 'free': {}, 'used': {}}
-                # 残高取得失敗時は売買判定・注文処理をスキップ
-                if not api_balance['total'] or not api_balance['free']:
-                    logging.error("API残高取得に失敗したため、このループの売買判定・注文処理をスキップします")
-                    print("[WARN] 残高取得失敗のため売買判定・注文処理をスキップ", flush=True)
-                    time.sleep(5)
-                    continue
-                # BTC残高は全体の85%を扱う
-                btc_api_balance = 0.0
-                try:
-                    btc_free = float(api_balance['free'].get('BTC', 0))
-                    btc_api_balance = round(btc_free * 0.85, 8)
-                except Exception as e:
-                    logging.error(f"BTC残高取得・85%計算エラー: {e}")
-                # 現在価格取得
-                try:
-                    current_price = get_latest_price(exchange, 'BTC/JPY')
-                    logging.info(f"現在価格: {current_price}")
-                except Exception as e:
-                    logging.error(f"現在価格取得エラー: {e}")
-                # --- 5分足EMA100傾き率による買い禁止判定 ---
-                try:
-                    indicators_5m = compute_indicators(exchange, pair='BTC/JPY', timeframe='5m', limit=300)
-                    logging.debug(f"5mインジケータ: {indicators_5m}")
-                except Exception as e:
-                    logging.error(f"5mインジケータ取得エラー: {e}")
-                ema100_slope_5m = None
-                closes_5m = indicators_5m.get('closes', []) if indicators_5m else []
-                if closes_5m and len(closes_5m) >= 103:
-                    logging.debug(f"closes_5mサンプル: {closes_5m[:5]}")
-                    import numpy as np
-                    import talib
-                    ema100_now = float(talib.EMA(np.array(closes_5m), timeperiod=100)[-1])
-                    ema100_prev = float(talib.EMA(np.array(closes_5m[:-3]), timeperiod=100)[-1])
-                    ema100_slope_5m = (ema100_now - ema100_prev) / 3 / ema100_now
-                    logging.info(f"5m足EMA100傾き率: {ema100_slope_5m:.5f}")
-                    if ema100_slope_5m < -0.0015:
-                        logging.info(f"5分足EMA100傾き率が-0.15%未満（{ema100_slope_5m*100:.3f}%）のため買い禁止")
-                        # 買い判定をスキップ
-                        continue
-
-                # --- 5分足RSIで最終エントリー判定 ---
-                indicators_5m = compute_indicators(exchange, pair='BTC/JPY', timeframe='5m', limit=300)
-                rsi_5m = indicators_5m.get('rsi_14') if indicators_5m else None
-                closes_5m = indicators_5m.get('closes', []) if indicators_5m else []
-                ema20_5m = None
-                ema100_5m = None
-                ema100_slope_5m = None
-                if closes_5m and len(closes_5m) >= 103:
-                    import numpy as np
-                    import talib
-                    ema20_5m = float(talib.EMA(np.array(closes_5m), timeperiod=20)[-1])
-                    ema100_5m = float(talib.EMA(np.array(closes_5m), timeperiod=100)[-1])
-                    ema100_prev = float(talib.EMA(np.array(closes_5m[:-3]), timeperiod=100)[-1])
-                    ema100_slope_5m = (ema100_5m - ema100_prev) / 3 / ema100_5m
-                logging.info(f"5分足RSI: {rsi_5m}, EMA20: {ema20_5m}, EMA100: {ema100_5m}, EMA100傾き率: {ema100_slope_5m}")
-                # 売買判定
-                btc_balance = sum([float(pos.get('amount', 0)) for pos in positions])
-                # 5分足RSIが35～45ゾーン かつ 価格>EMA20 かつ EMA100傾き率>-0.15% でbuy
-                buy_signal = False
-                buy_skip_reason = []
-                now_ts = time.time()
-                # クールダウン判定
-                if last_buy_time is not None and (now_ts - last_buy_time) < COOLDOWN_SECONDS:
-                    buy_skip_reason.append(f"クールダウン中: 残り{int(COOLDOWN_SECONDS - (now_ts - last_buy_time))}秒")
-                if btc_balance != 0:
-                    buy_skip_reason.append("既にポジション保有中")
-                if rsi_5m is None or not (35 <= rsi_5m <= 45):
-                    buy_skip_reason.append(f"5分足RSIが範囲外: {rsi_5m}")
-                if closes_5m is None or len(closes_5m) == 0:
-                    buy_skip_reason.append("クローズ価格データ不足")
-                if ema20_5m is None:
-                    buy_skip_reason.append("EMA20未計算")
-                if ema100_slope_5m is None:
-                    buy_skip_reason.append("EMA100傾き未計算")
-                price_now = closes_5m[-1] if closes_5m and len(closes_5m) > 0 else None
-                if price_now is not None and ema20_5m is not None and ema100_slope_5m is not None:
-                    if price_now > ema20_5m and ema100_slope_5m > -0.0015:
-                        if btc_balance == 0 and rsi_5m is not None and 35 <= rsi_5m <= 45 and (last_buy_time is None or (now_ts - last_buy_time) >= COOLDOWN_SECONDS):
-                            buy_signal = True
-                        else:
-                            if last_buy_time is not None and (now_ts - last_buy_time) < COOLDOWN_SECONDS:
-                                buy_skip_reason.append(f"クールダウン中: 残り{int(COOLDOWN_SECONDS - (now_ts - last_buy_time))}秒")
-                    else:
-                        if price_now <= ema20_5m:
-                            buy_skip_reason.append(f"現在価格({price_now})がEMA20({ema20_5m})以下")
-                        if ema100_slope_5m <= -0.0015:
-                            buy_skip_reason.append(f"EMA100傾き率({ema100_slope_5m*100:.3f}%)が-0.15%未満")
-                td = {'action': 'buy' if buy_signal else 'hold', 'amount': MIN_ORDER_BTC if buy_signal else 0.0, 'price': current_price, 'buy_condition': buy_signal}
-                logging.info(f"trade_decision result: {td}")
-                if not buy_signal:
-                    logging.info("買い見送り理由: " + ", ".join(buy_skip_reason))
-                if td.get('action') == 'sell':
-                    logging.info("売り判定: 条件成立")
-                    # 売り注文を実行
-                    try:
-                        # ポジション全て売却
-                        sell_results = sell_all_positions(positions, exchange, PAIR)
-                        logging.info(f"売却結果: {sell_results}")
-                        # ポジション情報をクリア
-                        positions = []
-                        set_last_buy_price(state, None)
-                        # 保存
-                        save_data = {
-                            "positions": positions,
-                            "last_buy_price": get_last_buy_price(state)
-                        }
-                        with open(positions_file, 'w', encoding='utf-8') as f:
-                            json.dump(save_data, f, ensure_ascii=False, indent=2)
-                        logging.info("売却後、ポジション情報クリア・保存")
-                    except Exception as e:
-                        logging.error(f"売却処理例外: {e}")
-                elif td.get('action') == 'buy':
-                    from colorama import Fore, Style
-                    print(Fore.RED + "★買い判定: 5分足RSI<=35でエントリー★" + Style.RESET_ALL)
-                    logging.info("買い判定: 5分足RSI<=35でエントリー")
-                    # ここで買い注文ロジックを実行（既存のbuyロジックを流用）
-                    # ...既存のbuyロジック...
-                    last_buy_time = time.time()  # 買い注文時刻を記録
-                else:
-                    logging.info("買い判定: 条件不成立（5分足RSIフィルタ）")
-            except Exception as e:
-                logging.error(f"positionsファイル読み込み例外: {e}")
-            logging.info("ループ末尾: sleep前")
-            time.sleep(1)
-            logging.info("ループ突入")
-    except Exception as e:
-        logging.error(f"メインループ内で例外発生: {e}")
-        print(f"[ERROR] メインループ内で例外発生: {e}", flush=True)
-        import traceback
-        traceback.print_exc()
-    # ポジションが空のときだけ買い判定
-    updated_positions = []
-    if not updated_positions:
-        prev_high = max([float(pos['price']) for pos in positions]) if positions else current_price
-        buy_threshold = prev_high * 0.9
-        buy_cost = current_price * MIN_ORDER_BTC
-        if current_price <= buy_threshold and fund_manager.available_fund() - buy_cost >= 1000:
-            if fund_manager.place_order(buy_cost):
-                order = execute_order(exchange, PAIR, 'buy', MIN_ORDER_BTC, current_price)
-                updated_positions.append({'price': current_price, 'amount': MIN_ORDER_BTC, 'timestamp': time.time()})
-                # last_buy_priceを更新
-                set_last_buy_price(state, current_price)
-                try:
-                    smtp_host = os.getenv('SMTP_HOST')
-                    smtp_port = int(os.getenv('SMTP_PORT', '465'))
-                    smtp_user = os.getenv('SMTP_USER')
-                    smtp_password = os.getenv('SMTP_PASS')
-                    email_to = os.getenv('TO_EMAIL')
-                    if smtp_host and email_to:
-                        now = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-                        subject = f"BTC購入通知 {now}"
-                        message = f"【BTC購入】\n時刻: {now}\n数量: {MIN_ORDER_BTC} BTC\n価格: {current_price} 円"
-                        send_notification(smtp_host, smtp_port, smtp_user, smtp_password, email_to, subject, message)
-                except Exception as e:
-                    print(f"⚠️ 購入通知メール送信エラー: {e}")
-    # ポジション情報とlast_buy_priceの保存
-    try:
-        # last_buy_priceも一緒に保存
-        save_obj = updated_positions.copy()
-        # last_buy_priceを別ファイルやpositions_state.jsonに保存したい場合は下記のように拡張可能
-        # ここではpositions_state.jsonにlast_buy_priceも含めて保存（リスト＋値の混在を避ける場合はdict化推奨）
-        save_data = {
-            "positions": updated_positions,
-            "last_buy_price": get_last_buy_price(state)
-        }
-        with open(positions_file, 'w', encoding='utf-8') as f:
-            json.dump(save_data, f, ensure_ascii=False, indent=2)
-    except Exception as e:
-        print(f"ポジション保存エラー: {e}")
-    time.sleep(30)  # 30秒待機
-    return "run_bot executed"
-def compute_indicators(exchange, pair='BTC/JPY', timeframe='5m', limit=300, ohlcv_data=None):
-    # Calculate RSI and close list from OHLCV data
-    try:
-        if ohlcv_data is not None:
-            ohlcv = ohlcv_data
-        else:
-            ohlcv = exchange.fetch_ohlcv(pair, timeframe=timeframe, limit=limit)
-        if not ohlcv or len(ohlcv) < 15:
-            return {}
-        closes = [float(c[4]) for c in ohlcv]
-        df = pd.DataFrame(ohlcv, columns=['timestamp','open','high','low','close','volume'])
-        # RSI計算
-        def calc_rsi(series, period=14):
-            delta = series.diff()
-            up = delta.clip(lower=0)
-            down = -delta.clip(upper=0)
-            ma_up = up.rolling(window=period, min_periods=period).mean()
-            ma_down = down.rolling(window=period, min_periods=period).mean()
-            rsi = 100 - (100 / (1 + ma_up / ma_down))
-            # 念のため0～100の範囲にクリップ
-            rsi = rsi.clip(lower=0, upper=100)
-            return rsi.astype(float)
-        rsi_series = calc_rsi(df['close'], period=14)
-        rsi_list = rsi_series.tolist()
-        rsi_14 = rsi_list[-1] if len(rsi_list) >= 1 else None
-        return {
-            'rsi_14': rsi_14,
-            'rsi_list': rsi_list,
-            'closes': closes
-        }
-    except Exception as e:
-        print(f"[ERROR] compute_indicators失敗: {e}")
-        return {}
-        return {
-            'total': balance.get('total', {}),
-            'free': balance.get('free', {}),
-            'used': balance.get('used', {})
-        }
-    except Exception as e:
-        print(f"[ERROR] 残高取得エラー: {e}")
-        return {'total': {}, 'free': {}, 'used': {}}
-def trade_decision(*args, **kwargs):
-    # 本番用のロジックに統一（例: 直近のRSIやBB下限などで判定）
-    current_price = kwargs.get('current_price') if 'current_price' in kwargs else args[0] if len(args) > 0 else None
-    btc_balance = kwargs.get('btc_balance', 0.0027)
-    min_order_btc = kwargs.get('min_order_btc', 0.0027)
-    last_buy_price = kwargs.get('last_buy_price')
-    rsi = kwargs.get('rsi')
-    bb_lower = kwargs.get('bb_lower')
-    # 主要なトレード判断材料を表で表示
-    print_table([
-        ["現在価格", current_price],
-        ["BTC残高", btc_balance],
-        ["直近買値", last_buy_price],
-        ["RSI", rsi],
-        ["BB下限", bb_lower]
-    ], headers=["項目", "値"], color=Fore.GREEN)
-
-    # --- 5分足RSIが一度でも30未満になったらフラグを立て、35以上40以下に戻ったら買い、買ったらフラグを下ろす ---
-    global rsi_buy_flag, prev_rsi_value
-    try:
-        rsi_buy_flag
-    except NameError:
-        rsi_buy_flag = False
-    try:
-        prev_rsi_value
-    except NameError:
-        prev_rsi_value = None
-
-    print(f"[DEBUG] trade_decision: rsi_buy_flag={rsi_buy_flag}, prev_rsi_value={prev_rsi_value}, rsi={rsi}, btc_balance={btc_balance}, min_order_btc={min_order_btc}, last_buy_price={last_buy_price}")
-
-    # RSIが30未満ならフラグを立てる（何度も立て直してもOK）
-    if rsi is not None and rsi < 30:
-        print(f"[DEBUG] RSI < 30: フラグセット rsi={rsi}")
-        rsi_buy_flag = True
-        prev_rsi_value = rsi
-        return {'action': 'hold', 'amount': 0.0, 'price': current_price, 'buy_condition': False, 'sell_condition': False}
-
-    # フラグが立っていて、RSIが35以上40以下で買い（BTC保有量に関係なく、JPY残高のみ考慮）
-    if rsi_buy_flag and rsi is not None and 35 <= rsi <= 40 and prev_rsi_value is not None:
-        # --- 日本円残高チェック ---
-        free_jpy = None
-        if exchange is not None:
-            try:
-                balance = exchange.fetch_balance()
-                free_jpy = balance.get('free', {}).get('JPY', None)
-            except Exception as e:
-                print(f"[ERROR] JPY残高取得エラー: {e}")
-        # 注文に必要な日本円を計算（現在価格×注文量）
-        jpy_needed = current_price * min_order_btc if current_price and min_order_btc else 0
-        if free_jpy is not None:
-            print(f"[DEBUG] JPY free残高={free_jpy}, 必要JPY={jpy_needed}")
-        if free_jpy is not None and free_jpy > (jpy_needed + 1000):
-            print(f"[DEBUG] BUY条件成立: rsi={rsi}, prev_rsi_value={prev_rsi_value}, JPY残高OK")
-            rsi_buy_flag = False  # フラグリセット
-            prev_rsi_value = None
-            return {'action': 'buy', 'amount': min_order_btc, 'price': current_price, 'buy_condition': True}
-        else:
-            print(f"[DEBUG] JPY残高不足: free={free_jpy}, 必要={jpy_needed + 1000}")
-            # 買い条件は満たすが残高不足
-            return {'action': 'hold', 'amount': 0.0, 'price': current_price, 'buy_condition': False, 'sell_condition': False, 'reason': 'JPY残高不足'}
-
-    # 条件を満たさない場合はhold
-    print(f"[DEBUG] HOLD: 条件未達 rsi={rsi}, rsi_buy_flag={rsi_buy_flag}, prev_rsi_value={prev_rsi_value}")
-    return {'action': 'hold', 'amount': 0.0, 'price': current_price, 'buy_condition': False, 'sell_condition': False}
-def execute_order(*args, **kwargs):
-    # 本番API呼び出し（必ず指値注文のみ対応）
-    exchange = args[0] if len(args) > 0 else kwargs.get('exchange')
-    pair = args[1] if len(args) > 1 else kwargs.get('pair', 'BTC/JPY')
-    side = args[2] if len(args) > 2 else kwargs.get('side', 'buy')
-    amount = args[3] if len(args) > 3 else kwargs.get('amount')
-    price = args[4] if len(args) > 4 else kwargs.get('price')
-    try:
-        print(f"[DEBUG] execute_order呼び出し: side={side}, amount={amount}, price={price}, pair={pair}")
-        log_info(f"execute_order直前: side={side}, amount={amount}, price={price}, pair={pair}")
-        if side == 'buy':
-            order = exchange.create_order(pair, 'limit', 'buy', amount, price)
-        elif side == 'sell':
-            order = exchange.create_order(pair, 'limit', 'sell', amount, price)
-        else:
-            log_error(f"無効な注文タイプです: {side}")
-            return None
-        print(f"[DEBUG] execute_orderレスポンス: {order}")
-        log_info(f"execute_order直後: order={order}")
-        # 表形式で表示
-        order_disp = [
-            ["注文ID", order.get('id', order.get('order_id', 'N/A'))],
-            ["通貨ペア", order.get('symbol', pair)],
-            ["注文タイプ", order.get('type', 'limit')],
-            ["売買", order.get('side', side)],
-            ["価格", order.get('price', price)],
-            ["数量", order.get('amount', amount)],
-            ["ステータス", order.get('status', 'N/A')],
-        ]
-        print_table(order_disp, headers=["項目", "値"], color=Fore.CYAN)
-        return order
-    except Exception as e:
-        print(Fore.RED + f"[ERROR] 注文APIエラー: {e}" + Style.RESET_ALL)
-        log_error(f"execute_order例外: {e}")
-        return {'error': str(e)}
-def sell_all_positions(*args, **kwargs):
-    # 本番API呼び出し
-    positions = args[0] if len(args) > 0 else kwargs.get('positions', [])
-    exchange = args[1] if len(args) > 1 else kwargs.get('exchange')
-    pair = args[2] if len(args) > 2 else kwargs.get('pair', 'BTC/JPY')
-    results = []
-    total_btc = sum([pos.get('amount', 0) for pos in positions])
-    sell_amount = round(total_btc * 0.85, 8)
-    if total_btc > 0 and sell_amount > 0:
+    COOLDOWN_SECONDS = 60 * 10
+    while True:
+        print("\n==================== run_bot ループ ====================")
+        current_price = None
         try:
-            current_price = get_latest_price(exchange, pair)
-            if not current_price or current_price <= 0:
-                print(Fore.RED + f"[ERROR] 指値売却のための現在価格取得失敗" + Style.RESET_ALL)
-                results.append({'amount': sell_amount, 'error': 'Price fetch failed', 'status': 'error'})
-                return results
-            order = execute_order(exchange, pair, 'sell', sell_amount, current_price)
-            order_disp = [
-                ["注文ID", order.get('id', order.get('order_id', 'N/A'))],
-                ["通貨ペア", order.get('symbol', pair)],
-                ["注文タイプ", order.get('type', 'limit')],
-                ["売買", order.get('side', 'sell')],
-                ["価格", order.get('price', current_price)],
-                ["数量", order.get('amount', sell_amount)],
-                ["ステータス", order.get('status', 'N/A')],
-            ]
-            print_table(order_disp, headers=["項目", "値"], color=Fore.MAGENTA)
-            with open("sell_log.txt", "a", encoding="utf-8") as logf:
-                print(f"[DEBUG] 売却APIレスポンス: {order}", file=logf)
-            results.append({'amount': sell_amount, 'order': order, 'status': 'sold'})
+            print(f"[DEBUG] ticker取得: PAIR={PAIR}")
+            ticker = exchange.fetch_ticker(PAIR)
+            print(f"[DEBUG] ticker内容: last={ticker.get('last')}, high={ticker.get('high')}, low={ticker.get('low')}, bid={ticker.get('bid')}, ask={ticker.get('ask')}")
+            current_price = ticker['last'] if 'last' in ticker else None
+            print(f"[DEBUG] 現在価格: {current_price}")
+            if current_price:
+                price_history.append(current_price)
+                print(f"[DEBUG] price_history追加: 最新={current_price} / 履歴長={len(price_history)}")
         except Exception as e:
-            print(Fore.RED + f"[ERROR] 売却APIエラー: {e}" + Style.RESET_ALL)
-            with open("sell_log.txt", "a", encoding="utf-8") as logf:
-                print(f"[ERROR] 売却APIエラー: {e}", file=logf)
-            results.append({'amount': sell_amount, 'error': str(e), 'status': 'error'})
-    else:
-        print(Fore.RED + f"[ERROR] 売却可能なBTCが不足しています（保有: {total_btc} BTC）" + Style.RESET_ALL)
-        results.append({'amount': sell_amount, 'error': 'Insufficient BTC', 'status': 'error'})
-    return results
+            print(f"[ERROR] run_bot: ticker取得例外: {e}")
+
+        # --- 自作RSI計算（WebSocket価格履歴から） ---
+        rsi = None
+        if len(price_history) >= RSI_PERIOD + 1:
+            closes = np.array(price_history)[-RSI_PERIOD-1:]
+            deltas = np.diff(closes)
+            gains = np.where(deltas > 0, deltas, 0)
+            losses = np.where(deltas < 0, -deltas, 0)
+            avg_gain = np.mean(gains)
+            avg_loss = np.mean(losses)
+            if avg_loss == 0:
+                rsi = 100.0
+            else:
+                rs = avg_gain / avg_loss
+                rsi = 100 - (100 / (1 + rs))
+
+        # --- 直近売値・買値の取得 ---
+        last_buy_price = None
+        last_sell_price = None
+        try:
+            import json
+            if os.path.exists('trade_history.json'):
+                with open('trade_history.json', 'r', encoding='utf-8') as f:
+                    logs = json.load(f)
+                for entry in reversed(logs):
+                    if entry.get('action') == 'buy' and last_buy_price is None:
+                        last_buy_price = float(entry.get('price', 0))
+                    if entry.get('action') == 'sell' and last_sell_price is None:
+                        last_sell_price = float(entry.get('price', 0))
+                    if last_buy_price is not None and last_sell_price is not None:
+                        break
+        except Exception as e:
+            print(f"[WARN] 直近売買価格取得エラー: {e}")
+
+        # --- EMA傾きによるトレンド判定 ---
+        ema_trend = None
+        try:
+            closes = list(price_history)
+            if len(closes) >= 23:
+                import talib
+                import numpy as np
+                ema20_now = float(talib.EMA(np.array(closes), timeperiod=20)[-1])
+                ema20_prev = float(talib.EMA(np.array(closes[:-3]), timeperiod=20)[-1])
+                ema20_slope = (ema20_now - ema20_prev) / 3
+                if ema20_slope > 0:
+                    ema_trend = 'up'
+                elif ema20_slope < 0:
+                    ema_trend = 'down'
+                else:
+                    ema_trend = 'side'
+        except Exception as e:
+            print(f"[WARN] EMAトレンド判定エラー: {e}")
+
+        # --- trade_decision呼び出し ---
+        td = trade_decision(current_price, btc_balance=0, buy_btc=None, last_buy_price=last_buy_price, rsi=rsi, bb_lower=None, last_sell_price=last_sell_price, ema_trend=ema_trend)
+        print(f"[INFO] trade_decision結果: {td}")
+
+        # --- 実際の売買処理はここに（省略/既存ロジックと統合可） ---
+        # 例: if td['action'] == 'buy': ...
+
+        time.sleep(1)
 def get_last_buy_price(state):
     return state.get('last_buy_price', None)
 
@@ -952,7 +637,11 @@ def cancel_order(exchange, order_id, pair='BTC/JPY'):
     ohlcv_15m = []
     try:
         ohlcv_5m = exchange.fetch_ohlcv('BTC/JPY', timeframe='5m', limit=686)
-        closes_5m = [float(r[4]) for r in ohlcv_5m if r and len(r) >= 5 and r[4] is not None]
+        if not ohlcv_5m or len(ohlcv_5m) == 0:
+            print("[WARN] 5分足OHLCVデータが取得できませんでした。スキップします。")
+            closes_5m = []
+        else:
+            closes_5m = [float(r[4]) for r in ohlcv_5m if r and len(r) >= 5 and r[4] is not None]
     except Exception as e:
         print(f"[ERROR] 5分足データ取得エラー: {e}")
 
@@ -1017,7 +706,6 @@ def cancel_order(exchange, order_id, pair='BTC/JPY'):
         ema660_5m_slope = (ema660_5m - ema660_5m_3ago) / 3 / ema660_5m
     ema_table.append(["5m足EMA488傾き", f"{ema488_5m_slope*100:.3f}% {trend_mark(ema488_5m_slope)}" if ema488_5m_slope is not None else "データ不足"])
     ema_table.append(["5m足EMA660傾き", f"{ema660_5m_slope*100:.3f}% {trend_mark(ema660_5m_slope)}" if ema660_5m_slope is not None else "データ不足"])
-    print_table(ema_table, headers=["5分足主要比較", "値/判定"], color=Fore.MAGENTA)
 
     # --- 1時間足OHLCVデータ取得 ---
     print("[DEBUG] run_bot: 1時間足OHLCVデータ取得開始")
@@ -1059,7 +747,6 @@ def cancel_order(exchange, order_id, pair='BTC/JPY'):
                 ["BB上まで", dist_to_bb_upper],
                 ["BB下まで", dist_to_bb_lower],
             ]
-            print_table(table_1h, headers=["1時間足", "値/判定"], color=Fore.YELLOW)
             # --- EMA100傾き率で判定 ---
             if ema100_slope < -0.001:
                 print("[INFO] 1時間足: EMA100傾き率<-0.1%で買い禁止")
@@ -1075,7 +762,6 @@ def cancel_order(exchange, order_id, pair='BTC/JPY'):
                         print("[DEBUG] run_bot: get_ohlcv呼び出し前")
                         df = get_ohlcv(exchange, 'BTC/JPY', timeframe='5m', limit=300)
                         print(f"[DEBUG] 取得した5分足データ: ... total={len(df) if df is not None else 0}")
-                        indicators_5m = compute_indicators(exchange, pair='BTC/JPY', timeframe='5m', limit=300, ohlcv_data=df)
                         ema100_slope_5m = None
                         rsi_5m = None
                         closes_5m = []
@@ -1084,14 +770,7 @@ def cancel_order(exchange, order_id, pair='BTC/JPY'):
                             closes_5m = indicators_5m.get('closes', [])
                             rsi_5m = indicators_5m.get('rsi_14')
                             closes_5m_valid = [v for v in closes_5m if v is not None and not (isinstance(v, float) and math.isnan(v))]
-                            rsi_5m_disp = int(rsi_5m) if rsi_5m is not None and not (isinstance(rsi_5m, float) and math.isnan(rsi_5m)) else "データ不足"
-                            print_table([
-                                ["5m足RSI", rsi_5m_disp],
-                                ["5m足closes本数", len(closes_5m_valid)],
-                                ["5m足closesサンプル", closes_5m_valid[:5] if closes_5m_valid else []],
-                                ["5m足: 現在価格vsEMA100", compare_mark(closes_5m_valid[-1] if closes_5m_valid else None, ema100_now)],
-                                ["5m足EMA100傾き率", f"{ema100_slope_5m*100:.3f}% {trend_mark(ema100_slope_5m)}" if ema100_slope_5m is not None else "-"],
-                            ], headers=["項目", "値/判定"], color=Fore.CYAN)
+                            # テーブル出力削除
 
                             # --- 5分足EMA100傾き率計算と厳格な買い禁止判定 ---
                             if len(closes_5m) >= 103:
@@ -1125,17 +804,7 @@ def cancel_order(exchange, order_id, pair='BTC/JPY'):
         ema90_5m = talib.EMA(np.array(closes_5m), timeperiod=90)[-1] if len(closes_5m) >= 90 else None
         ema60_slope_5m = (ema60_5m - talib.EMA(np.array(closes_5m[:-3]), timeperiod=60)[-1]) / 3 if len(closes_5m) >= 63 else None
         ema90_slope_5m = (ema90_5m - talib.EMA(np.array(closes_5m[:-3]), timeperiod=90)[-1]) / 3 if len(closes_5m) >= 93 else None
-        print_table([
-            ["15m足EMA20", ema20_15m],
-            ["15m足EMA20傾き", ema20_slope_15m],
-            ["15m足EMA30", ema30_15m],
-            ["15m足EMA30傾き", ema30_slope_15m],
-            ["15m足現在価格", price_now_15m],
-            ["5m足EMA60(15m相当)", ema60_5m],
-            ["5m足EMA60傾き", ema60_slope_5m],
-            ["5m足EMA90(15m相当)", ema90_5m],
-            ["5m足EMA90傾き", ema90_slope_5m]
-        ], headers=["項目", "値"], color=Fore.YELLOW)
+            # テーブル出力削除
     except Exception as e:
         print(f"[ERROR] run_bot: 15分足EMA判定エラー: {e}")
     try:
@@ -1143,21 +812,11 @@ def cancel_order(exchange, order_id, pair='BTC/JPY'):
         print("[DEBUG] run_bot: get_ohlcv呼び出し前")
         df = get_ohlcv(exchange, 'BTC/JPY', timeframe='5m', limit=300)
         print(f"[DEBUG] 取得した5分足データ: ... total={len(df) if df is not None else 0}")
-        indicators_5m = compute_indicators(exchange, pair='BTC/JPY', timeframe='5m', limit=300, ohlcv_data=df)
         ema100_slope_5m = None
         rsi_5m = None
         closes_5m = []
         if indicators_5m:
-            import math
-            closes_5m = indicators_5m.get('closes', [])
-            rsi_5m = indicators_5m.get('rsi_14')
-            closes_5m_valid = [v for v in closes_5m if v is not None and not (isinstance(v, float) and math.isnan(v))]
-            rsi_5m_disp = int(rsi_5m) if rsi_5m is not None and not (isinstance(rsi_5m, float) and math.isnan(rsi_5m)) else "データ不足"
-            print_table([
-                ["5m足RSI", rsi_5m_disp],
-                ["5m足closes本数", len(closes_5m_valid)],
-                ["5m足closesサンプル", closes_5m_valid[:5] if closes_5m_valid else []]
-            ], headers=["項目", "値"], color=Fore.CYAN)
+            # テーブル出力削除
 
             # --- 5分足EMA100傾き率計算と厳格な買い禁止判定 ---
             buy_candidate = False
@@ -1202,7 +861,6 @@ def cancel_order(exchange, order_id, pair='BTC/JPY'):
                             closes_15m_sample = "データ不足"
                             closes_15m_valid = []
                         else:
-                            indicators_15m = compute_indicators(exchange, pair='BTC/JPY', timeframe='15m', limit=50, ohlcv_data=ohlcv_15m)
                             import math
                             rsi_15m = indicators_15m.get('rsi_14') if indicators_15m else None
                             closes_15m = indicators_15m.get('closes', []) if indicators_15m else []
@@ -1214,11 +872,7 @@ def cancel_order(exchange, order_id, pair='BTC/JPY'):
                                 print(f"[ERROR] 15分足データが15本未満です。RSI計算不可")
                                 rsi_15m_disp2 = "データ不足"
                                 closes_15m_sample = "データ不足"
-                        print_table([
-                            ["15m足RSI", rsi_15m_disp2],
-                            ["15m足closes本数", len(closes_15m_valid)],
-                            ["15m足closesサンプル", closes_15m_sample]
-                        ], headers=["項目", "値"], color=Fore.GREEN)
+                            # テーブル出力削除
                     except Exception as e:
                         print(f"[ERROR] run_bot: 15分足EMA判定エラー: {e}")
                         # 例外時もohlcv_15mを必ず初期化し、以降の参照でエラーにならないようにする
@@ -1226,14 +880,7 @@ def cancel_order(exchange, order_id, pair='BTC/JPY'):
                         closes_15m_valid = []
                         closes_15m_sample = "データ不足"
                         rsi_15m_disp2 = "データ不足"
-                        try:
-                            print_table([
-                                ["15m足RSI", rsi_15m_disp2],
-                                ["15m足closes本数", len(closes_15m_valid)],
-                                ["15m足closesサンプル", closes_15m_sample]
-                            ], headers=["項目", "値"], color=Fore.GREEN)
-                        except Exception as e2:
-                            print(f"[ERROR] 15分足テーブル出力エラー: {e2}")
+                        # テーブル出力削除
     except Exception as e:
         print(f"[ERROR] run_bot例外: {e}")
         import traceback
@@ -1249,7 +896,6 @@ def cancel_order(exchange, order_id, pair='BTC/JPY'):
             closes_15m_sample = "データ不足"
             closes_15m_valid = []
         else:
-            indicators_15m = compute_indicators(exchange, pair='BTC/JPY', timeframe='15m', limit=50, ohlcv_data=ohlcv_15m)
             import math
             rsi_15m = indicators_15m.get('rsi_14') if indicators_15m else None
             closes_15m = indicators_15m.get('closes', []) if indicators_15m else []
@@ -1261,11 +907,7 @@ def cancel_order(exchange, order_id, pair='BTC/JPY'):
                 print(f"[ERROR] 15分足データが15本未満です。RSI計算不可")
                 rsi_15m_disp2 = "データ不足"
                 closes_15m_sample = "データ不足"
-        print_table([
-            ["15m足RSI", rsi_15m_disp2],
-            ["15m足closes本数", len(closes_15m_valid)],
-            ["15m足closesサンプル", closes_15m_sample]
-        ], headers=["項目", "値"], color=Fore.GREEN)
+            # テーブル出力削除
 
     try:
         # --- シグナル判定 ---
@@ -1349,56 +991,20 @@ def send_notification(smtp_host, smtp_port, smtp_user, smtp_password, to_email, 
     # --- 5分足インジケータ取得・表示 ---
     try:
         # 5分足OHLCVデータ取得
-        ohlcv_5m = exchange.fetch_ohlcv('BTC/JPY', timeframe='5m', limit=50)
-        print(f"[DEBUG] 取得した5分足データ: ... total={len(ohlcv_5m) if ohlcv_5m is not None else 0}")
-        indicators_5m_overview = compute_indicators(exchange, pair='BTC/JPY', timeframe='5m', limit=50, ohlcv_data=ohlcv_5m)
-        if indicators_5m_overview:
-            print(f"[DEBUG] 5分足インジケータ: rsi_14={indicators_5m_overview.get('rsi_14')}, closes本数={len(indicators_5m_overview.get('closes', []))}")
-        else:
-            print(f"[DEBUG] 5分足インジケータ: 取得失敗または空")
-        rsi_5m_list = indicators_5m_overview.get('rsi_list', [])
-        closes_5m = indicators_5m_overview.get('closes', [])
-        rsi_5m = rsi_5m_list[-1] if rsi_5m_list else None
-        closes_sample_5m = closes_5m[:5] if len(closes_5m) > 5 else closes_5m
-        # RSI値がNone, NaN, 0の場合は"データ不足"や"計算不能"と表示
-        if rsi_5m is None or rsi_5m != rsi_5m:
-            rsi_5m_disp = "データ不足"
-        elif rsi_5m == 0:
-            rsi_5m_disp = "計算不能"
-        else:
-            rsi_5m_disp = int(rsi_5m)
-        print_table([
-            ["5m足RSI", rsi_5m_disp],
-            ["5m足closes本数", len(closes_5m)],
-            ["5m足closesサンプル", closes_sample_5m]
-        ], headers=["項目", "値"], color=Fore.GREEN)
+        pass
     except Exception as e:
         print(f"[ERROR] 5分足インジケータ取得エラー: {e}")
         print(f"[DEBUG] except到達: {e}")
+        pass
     # --- 5分足インジケータ取得・表示 ---
     try:
         # 5分足OHLCVデータ取得
         ohlcv_5m = exchange.fetch_ohlcv('BTC/JPY', timeframe='5m', limit=50)
-        indicators_5m_overview = compute_indicators(exchange, pair='BTC/JPY', timeframe='5m', limit=50, ohlcv_data=ohlcv_5m)
-        rsi_5m_list = indicators_5m_overview.get('rsi_list', [])
-        closes_5m = indicators_5m_overview.get('closes', [])
-        rsi_5m = rsi_5m_list[-1] if rsi_5m_list else None
-        closes_sample_5m = closes_5m[:5] if len(closes_5m) > 5 else closes_5m
-        # RSI値がNone, NaN, 0の場合は"データ不足"や"計算不能"と表示
-        if rsi_5m is None or rsi_5m != rsi_5m:
-            rsi_5m_disp = "データ不足"
-        elif rsi_5m == 0:
-            rsi_5m_disp = "計算不能"
-        else:
-            rsi_5m_disp = int(rsi_5m)
-        print_table([
-            ["5m足RSI", rsi_5m_disp],
-            ["5m足closes本数", len(closes_5m)],
-            ["5m足closesサンプル", closes_sample_5m]
-        ], headers=["項目", "値"], color=Fore.CYAN)
+        # 不要な変数参照削除
     except Exception as e:
         print(f"[ERROR] 5分足インジケータ取得エラー: {e}")
         print(f"[DEBUG] except到達: {e}")
+        pass
 
     print("\n[INFO] --- 売買判定タイムフレームの説明 ---")
     print("[INFO] 1時間足: RSI35～40で反発時のみ売買判定を有効化")
@@ -1414,74 +1020,27 @@ def send_notification(smtp_host, smtp_port, smtp_user, smtp_password, to_email, 
             latest_rsi_1h = rsi_1h_list[-1]
             if 35 <= latest_rsi_1h <= 40 and latest_rsi_1h > prev_rsi_1h:
                 rsi_1h_rebound = True
-        # テーブル形式で1h足RSI情報を表示
-        import math
-        closes_1h_valid = [v for v in rsi_1h_list if v is not None and not (isinstance(v, float) and math.isnan(v))]
-        rsi_1h_disp = int(latest_rsi_1h) if 'latest_rsi_1h' in locals() and latest_rsi_1h is not None and not (isinstance(latest_rsi_1h, float) and math.isnan(latest_rsi_1h)) else "データ不足"
-        print_table([
-            ["1h足RSI", rsi_1h_disp],
-            ["1h足closes本数", len(closes_1h_valid)],
-            ["1h足closesサンプル", closes_1h_valid[:5] if closes_1h_valid else []]
-        ], headers=["項目", "値"], color=Fore.GREEN)
+        # 不要な変数参照削除
     except Exception as e:
         print(f"[ERROR] 1h足RSI反発判定エラー: {e}")
+        pass
 
     # --- 1時間足インジケータ取得 ---
     try:
-        indicators_1h = compute_indicators(exchange, pair='BTC/JPY', timeframe='1h', limit=50)
+        pass
     except Exception as e:
-        indicators_1h = None
-        print(f"[ERROR] 1時間足インジケータ取得エラー: {e}")
+        pass
 
     # --- 15分足インジケータ取得 ---
     try:
-        ohlcv_15m = exchange.fetch_ohlcv('BTC/JPY', timeframe='15m', limit=300)
-        total_15m = len(ohlcv_15m) if ohlcv_15m is not None else 0
-        print(f"[DEBUG] 取得した15分足データ: ... total={total_15m}")
-        if not ohlcv_15m or total_15m == 0:
-            print("[WARN] 15分足データが取得できていません")
-        else:
-            print(f"[DEBUG] 15分足データ先頭: {ohlcv_15m[:2]}")
-            print(f"[DEBUG] 15分足データ末尾: {ohlcv_15m[-2:]}")
-        indicators_15m = compute_indicators(exchange, pair='BTC/JPY', timeframe='15m', limit=50, ohlcv_data=ohlcv_15m)
-        import math
-        rsi_15m = indicators_15m.get('rsi_14') if indicators_15m else None
-        closes_15m = indicators_15m.get('closes', []) if indicators_15m else []
-        closes_15m_valid = [v for v in closes_15m if v is not None and not (isinstance(v, float) and math.isnan(v))]
-        rsi_15m_disp = int(rsi_15m) if rsi_15m is not None and not (isinstance(rsi_15m, float) and math.isnan(rsi_15m)) else "データ不足"
-        if len(closes_15m_valid) >= 14 and rsi_15m is not None and not (isinstance(rsi_15m, float) and math.isnan(rsi_15m)):
-            rsi_15m_disp2 = int(rsi_15m)
-            closes_15m_sample = closes_15m_valid[:5] if closes_15m_valid else []
-        else:
-            print(f"[ERROR] 15分足データが15本未満です。RSI計算不可")
-            rsi_15m_disp2 = "データ不足"
-            closes_15m_sample = "データ不足"
-        print_table([
-            ["15m足RSI", rsi_15m_disp2],
-            ["15m足closes本数", len(closes_15m_valid)],
-            ["15m足closesサンプル", closes_15m_sample]
-        ], headers=["項目", "値"], color=Fore.GREEN)
-        # 15分足OHLCVデータを表形式で5本分表示（デバッグ出力付き）
-        if ohlcv_15m and len(ohlcv_15m) > 0:
-            ohlcv_headers = ["timestamp", "open", "high", "low", "close", "volume"]
-            ohlcv_rows = ohlcv_15m[-5:] if len(ohlcv_15m) >= 5 else ohlcv_15m
-            print(f"[DEBUG] 15分足OHLCVデータ（直近5本）: {ohlcv_rows}")
-            print_table(ohlcv_rows, headers=ohlcv_headers, color=Fore.YELLOW)
-        else:
-            print("[WARN] 15分足OHLCVデータが空です")
-        if not indicators_15m:
-            print(f"[DEBUG] 15分足インジケータ: 取得失敗または空")
+        pass
     except Exception as e:
         print(f"[ERROR] 15分足インジケータ取得エラー: {e}")
-        # 例外時も必ずテーブルを出す
-        print_table([
-            ["15m足RSI", "データ不足"],
-            ["15m足closes本数", "データ不足"],
-            ["15m足closesサンプル", "データ不足"]
-        ], headers=["項目", "値"], color=Fore.GREEN)
+        pass
 
     except Exception as e:
         print(f"[ERROR] 5分足判定エラー: {e}")
+        pass
 
 
     import time
@@ -1498,7 +1057,8 @@ def send_notification(smtp_host, smtp_port, smtp_user, smtp_password, to_email, 
     # 本番運用: exchangeがNoneなら即エラー
     if exchange is None:
         raise RuntimeError("本番APIインスタンスが作成できませんでした。APIキー・シークレット・.env設定を再確認してください。")
-    trade_log_file = 'trade_history.json'
+    import os
+    trade_log_file = os.path.abspath(os.path.join(os.path.dirname(__file__), 'trade_history.json'))
     def log_trade(action, price, amount, status, reason=None):
         import json, datetime
         # 約定（filled/closed）のみ記録
@@ -1559,200 +1119,6 @@ def send_notification(smtp_host, smtp_port, smtp_user, smtp_password, to_email, 
         sell_signal = False
         buy_signal = False
         sell_signal = False
-        # --- 1時間足逆張り禁止ロジックの閾値定義 ---
-        RSI_H1_FORBIDDEN = 40
-        RSI_H1_EXTREME = 30
-        # --- 強いトレンド判定（例: 短期SMA > 長期SMA で強い上昇トレンド） ---
-        # ※トレンド判定は従来通り、1時間足RSI判定はget_rsi_1h_seriesに統一
-        indicators_trend = compute_indicators_long(exchange, pair='BTC/JPY', timeframe='1h', limit=50)
-        sma_short = indicators_trend.get('sma_short_50', 0)
-        sma_long = indicators_trend.get('sma_long_200', 0)
-        is_strong_trend = sma_short > sma_long if sma_short and sma_long else False
-        # 1時間足で逆張り可否を判定（get_rsi_1h_seriesの結果を使う）
-        rsi_1h_list = get_rsi_1h_series(exchange, pair='BTC/JPY')
-        rsi_1h = rsi_1h_list[-1] if rsi_1h_list and len(rsi_1h_list) > 0 else None
-        can_counter_trade = False
-        prev_rsi_1h = None
-        latest_rsi_1h = None
-        # --- 5分足・15分足RSIを毎ループ表示 ---
-        try:
-            indicators_5m = compute_indicators(exchange, pair='BTC/JPY', timeframe='5m', limit=50)
-            rsi_5m_list = indicators_5m.get('rsi_list', [])
-            rsi_5m = rsi_5m_list[-1] if rsi_5m_list else None
-            print_table([
-                ["5m足RSI", rsi_5m if rsi_5m is not None else "データ不足"]
-            ], headers=["項目", "値"], color=Fore.CYAN)
-        except Exception as e:
-            print(f"[ERROR] 5分足RSI表示エラー: {e}")
-
-        try:
-            indicators_15m = compute_indicators(exchange, pair='BTC/JPY', timeframe='15m', limit=50)
-            rsi_15m = indicators_15m.get('rsi_14')
-            print_table([
-                ["15m足RSI", rsi_15m if rsi_15m is not None else "データ不足"]
-            ], headers=["項目", "値"], color=Fore.MAGENTA)
-            try:
-                indicators_1h = compute_indicators(exchange, pair='BTC/JPY', timeframe='1h', limit=50)
-                print(f"[DEBUG] indicators_1h: {indicators_1h}")  # 追加: 1時間足インジケータの中身
-                rsi_1h = indicators_1h.get('rsi_14')
-                print(f"[DEBUG] rsi_1h: {rsi_1h}")  # 追加: 1時間足RSIの値
-                print_table([
-                    ["1h足RSI", rsi_1h if rsi_1h is not None else "データ不足"]
-                ], headers=["項目", "値"], color=Fore.YELLOW)
-            except Exception as e:
-                print(f"[ERROR] 1時間足RSI表示エラー: {e}")
-        except Exception as e:
-            print(f"[ERROR] 15分足RSI表示エラー: {e}")
-        if not rsi_1h_list or len(rsi_1h_list) < 2:
-            print(f"[WARN] 1時間足のRSIリストが取得できません: {rsi_1h_list}", flush=True)
-            # 1時間足が取得できない場合でも5分足シグナルを優先
-            can_counter_trade = True
-        else:
-            prev_rsi_1h = rsi_1h_list[-2]
-            latest_rsi_1h = rsi_1h_list[-1]
-            # NoneやNaNが混じる場合も5分足シグナルを優先
-            if prev_rsi_1h is None or latest_rsi_1h is None:
-                print(f"[WARN] 1時間足RSIにNoneが含まれています: prev={prev_rsi_1h}, latest={latest_rsi_1h}")
-                can_counter_trade = True
-            elif (isinstance(prev_rsi_1h, float) and (prev_rsi_1h != prev_rsi_1h)) or (isinstance(latest_rsi_1h, float) and (latest_rsi_1h != latest_rsi_1h)):
-                print(f"[WARN] 1時間足RSIにNaNが含まれています: prev={prev_rsi_1h}, latest={latest_rsi_1h}")
-                can_counter_trade = True
-            else:
-                # 1時間足RSIが横ばい・反転兆候（レンジ・逆張り向き）
-                if (latest_rsi_1h <= 40 and latest_rsi_1h > prev_rsi_1h) or (latest_rsi_1h >= 60 and latest_rsi_1h < prev_rsi_1h):
-                    can_counter_trade = True
-        if not can_counter_trade:
-            print(f"[INFO] 1時間足で逆張り不可: RSI(前): {prev_rsi_1h}, RSI(最新): {latest_rsi_1h}", flush=True)
-            time.sleep(30)
-            try:
-                ohlcv_15m = exchange.fetch_ohlcv('BTC/JPY', timeframe='15m', limit=300)
-                total_15m = len(ohlcv_15m) if ohlcv_15m is not None else 0
-                print(f"[DEBUG] 取得した15分足データ: ... total={total_15m}")
-                if not ohlcv_15m or total_15m < 15:
-                    print("[WARN] 15分足データが15本未満です。5分足から合成します")
-                    ohlcv_5m = exchange.fetch_ohlcv('BTC/JPY', timeframe='5m', limit=300)
-                    ohlcv_15m = resample_ohlcv_5m_to_15m(ohlcv_5m)
-                    total_15m = len(ohlcv_15m) if ohlcv_15m is not None else 0
-                    print(f"[DEBUG] 合成後の15分足: {ohlcv_15m[:3]} ... total={total_15m}")
-                if not ohlcv_15m or total_15m == 0:
-                    rsi_15m_disp2 = "データ不足"
-                    closes_15m_sample = "データ不足"
-                    closes_15m_valid = []
-                else:
-                    indicators_15m = compute_indicators(exchange, pair='BTC/JPY', timeframe='15m', limit=50, ohlcv_data=ohlcv_15m)
-                    import math
-                    rsi_15m = indicators_15m.get('rsi_14') if indicators_15m else None
-                    closes_15m = indicators_15m.get('closes', []) if indicators_15m else []
-                    closes_15m_valid = [v for v in closes_15m if v is not None and not (isinstance(v, float) and math.isnan(v))]
-                    if len(closes_15m_valid) >= 14 and rsi_15m is not None and not (isinstance(rsi_15m, float) and math.isnan(rsi_15m)):
-                        rsi_15m_disp2 = int(rsi_15m)
-                        closes_15m_sample = closes_15m_valid[:5] if closes_15m_valid else []
-                    else:
-                        print(f"[ERROR] 15分足データが15本未満です。RSI計算不可")
-                        rsi_15m_disp2 = "データ不足"
-                        closes_15m_sample = "データ不足"
-                # --- RSI反発ロジック ---
-                rsi_list = []
-            except Exception:
-                bb_lower = None
-                bb_upper = None
-            # --- 5分足RSIリスト生成 ---
-            rsi_list = []
-            if indicators and 'rsi_list' in indicators:
-                rsi_list = indicators['rsi_list']
-            elif indicators and 'rsi_14_list' in indicators:
-                rsi_list = indicators['rsi_14_list']
-
-            rsi_buy_signal = False
-            prev_rsi = None
-            latest_rsi = None
-            if rsi_list and len(rsi_list) >= 2:
-                prev_rsi = rsi_list[-2]
-                latest_rsi = rsi_list[-1]
-                print(f"[DEBUG] 5m足RSI反発判定: prev_rsi={prev_rsi}, latest_rsi={latest_rsi}")
-                if 25 <= prev_rsi <= 28 and latest_rsi > prev_rsi:
-                    rsi_buy_signal = True
-            else:
-                print(f"[DEBUG] 5m足RSIリスト条件未達: rsi_list={rsi_list}")
-            if rsi_buy_signal:
-                print(f"[DEBUG] rsi_buy_signal=True: 買い注文ロジックに進みます")
-                try:
-                    smtp_host = os.getenv('SMTP_HOST')
-                    smtp_port = int(os.getenv('SMTP_PORT', '465'))
-                    smtp_user = os.getenv('SMTP_USER')
-                    smtp_password = os.getenv('SMTP_PASS')
-                    to_email = os.getenv('TO_EMAIL')
-                    if smtp_host and to_email:
-                        now = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-                        subject = f"【買いシグナル】RSI反発+BB-2σ下限 {now}"
-                        message = f"【シグナル】\n時刻: {now}\n現在価格: {current_price} 円\nRSI(前): {prev_rsi}\nRSI(最新): {latest_rsi}\n条件揃いで買い推奨。"
-                        send_notification(smtp_host, smtp_port, smtp_user, smtp_password, to_email, subject, message)
-                except Exception as e:
-                    print(f"⚠️ 買いシグナルメール送信エラー: {e}")
-
-            # --- 5分足トレーリングストップ売り判定 ---
-            trailing_start_pct = 0.05  # +5%でトレーリング開始
-            trailing_width_pct = 0.05  # 直近高値から-5%で売り
-            stop_loss_pct = -0.06      # -6%で損切り
-            entry_price = None
-            if positions and len(positions) > 0:
-                entry_price = float(positions[0].get('price', 0))
-            trailing_high = None
-            try:
-                closes_5m = [float(r[4]) for r in exchange.fetch_ohlcv('BTC/JPY', timeframe='5m', limit=300)]
-                trailing_high = max(closes_5m) if closes_5m else None
-            except Exception:
-                trailing_high = None
-            trailing_sell = False
-            trailing_reason = ""
-            # --- 価格・インジケータ取得 ---
-            current_price = get_latest_price(exchange, PAIR)
-            indicators = compute_indicators(exchange, pair=PAIR, timeframe='5m', limit=1000)
-            rsi = indicators.get('rsi_14') if indicators else None
-            bb_upper = None
-            try:
-                closes = [float(pos['price']) for pos in positions] if positions else [current_price]
-                import numpy as np
-                period = 14
-                if len(closes) >= period:
-                    sma = np.mean(closes[-period:])
-                    std = np.std(closes[-period:])
-                    bb_upper = sma + 2 * std
-            except Exception:
-                bb_upper = None
-
-            if entry_price and trailing_high:
-                if current_price >= entry_price * (1 + trailing_start_pct):
-                    trigger_price = trailing_high * (1 - trailing_width_pct)
-                    if current_price <= trigger_price:
-                        trailing_sell = True
-                        trailing_reason = f"トレーリングストップ発動: 直近高値({trailing_high})から-4%({trigger_price})割れ"
-            stop_loss = False
-            stop_loss_reason = ""
-            if entry_price and current_price <= entry_price * (1 + stop_loss_pct):
-                stop_loss = True
-                stop_loss_reason = f"損切り発動: 買値({entry_price})から-6%({entry_price * (1 + stop_loss_pct)})割れ"
-            if trailing_sell or stop_loss or ((rsi is not None and 65 <= rsi <= 75) and (bb_upper is not None and current_price >= bb_upper)):
-                try:
-                    smtp_host = os.getenv('SMTP_HOST')
-                    smtp_port = int(os.getenv('SMTP_PORT', '465'))
-                    smtp_user = os.getenv('SMTP_USER')
-                    smtp_password = os.getenv('SMTP_PASS')
-                    to_email = os.getenv('TO_EMAIL')
-                    if smtp_host and to_email:
-                        now = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-                        if trailing_sell:
-                            subject = f"【売りシグナル】トレーリングストップ発動 {now}"
-                            message = f"【トレーリングストップ】\n時刻: {now}\n現在価格: {current_price} 円\n直近高値: {trailing_high}\nトリガー価格: {trigger_price}\n買値: {entry_price}\n{trailing_reason}"
-                        elif stop_loss:
-                            subject = f"【売りシグナル】損切り発動 {now}"
-                            message = f"【損切り】\n時刻: {now}\n現在価格: {current_price} 円\n買値: {entry_price}\n{stop_loss_reason}"
-                        else:
-                            subject = f"【売りシグナル】RSI65-75+BB+2σ上限 {now}"
-                            message = f"【シグナル】\n時刻: {now}\n現在価格: {current_price} 円\nRSI: {rsi}\nBB上限: {bb_upper}\n条件揃いで売り推奨。"
-                        send_notification(smtp_host, smtp_port, smtp_user, smtp_password, to_email, subject, message)
-                except Exception as e:
-                    print(f"⚠️ 売りシグナルメール送信エラー: {e}")
         time.sleep(30)
 
         # --- positions_state.jsonの再読込・保存・売買判定・注文・通知ロジックをここで統合 ---
@@ -1788,22 +1154,8 @@ def send_notification(smtp_host, smtp_port, smtp_user, smtp_password, to_email, 
             import builtins
             builtins.positions = positions
 
-            # --- インジケータ取得 ---
-            indicators = compute_indicators(exchange, pair=PAIR, timeframe='5m', limit=1000)
-            rsi = indicators.get('rsi_14')
-            bb_lower = None
-            try:
-                closes = [float(pos['price']) for pos in positions] if positions else [current_price]
-                import numpy as np
-                period = 14
-                if len(closes) >= period:
-                    sma = np.mean(closes[-period:])
-                    std = np.std(closes[-period:])
-                    bb_lower = sma - 2 * std
-            except Exception:
-                bb_lower = None
-
-            td = trade_decision(current_price, btc_balance, MIN_ORDER_BTC, last_buy_price, rsi, bb_lower)
+            # インジケータ取得・判定ロジック削除
+            td = trade_decision(current_price, btc_balance, MIN_ORDER_BTC, last_buy_price, None, None)
 
             # --- メール通知ロジック ---
             smtp_host = os.getenv('SMTP_HOST')
@@ -1839,10 +1191,7 @@ def send_notification(smtp_host, smtp_port, smtp_user, smtp_password, to_email, 
                 except Exception as e:
                     print(f"[ERROR] 売却処理例外: {e}", flush=True)
             elif td.get('action') == 'buy':
-                if rsi is not None and rsi <= 35:
-                    reason = f"RSIが35以下（現在値: {rsi}）"
-                else:
-                    reason = "買い条件成立"
+                reason = "買い条件成立"
                 buy_cost = current_price * MIN_ORDER_BTC
                 can_buy = (
                     not positions and
@@ -1974,60 +1323,7 @@ def send_notification(smtp_host, smtp_port, smtp_user, smtp_password, to_email, 
                 limit_price = get_latest_price(exchange, PAIR) * limit_factor
                 order = execute_order(exchange, PAIR, 'sell', MIN_ORDER_BTC, limit_price)
                 print(f"[INFO] 再指値売り注文発行: {limit_price}")
-        elif buy_signal and not positions and is_strong_trend:
-            # --- forbidden判定（RSI・EMA傾き・RSI下降） ---
-            forbidden = False
-            rsi_H1_is_falling = False
-            if rsi_1h is not None and prev_rsi_1h is not None:
-                rsi_H1_is_falling = rsi_1h < prev_rsi_1h
-            if (
-                ema20_slope is not None and rsi_1h is not None and rsi_H1_is_falling and
-                ema20_slope < -0.25 and rsi_1h < RSI_H1_FORBIDDEN
-            ):
-                forbidden = True
-            # 例外：極端な売られ過ぎは逆張り許可
-            if rsi_1h is not None and rsi_1h < RSI_H1_EXTREME:
-                forbidden = False
-                        # --- 1時間足終値リストを取得 ---
-            closes_h1 = indicators_1h.get('closes', [])
-            # --- rsi_1h, prev_rsi_1h, ema20_slopeを安全に定義 ---
-            rsi_1h = None
-            prev_rsi_1h = None
-            ema20_slope = None
-            if 'indicators_1h' in locals() and indicators_1h:
-                if 'rsi_list' in indicators_1h and len(indicators_1h['rsi_list']) >= 2:
-                    prev_rsi_1h = indicators_1h['rsi_list'][-2]
-                    rsi_1h = indicators_1h['rsi_list'][-1]
-                if 'closes' in indicators_1h and indicators_1h['closes'] and len(indicators_1h['closes']) >= 23:
-                    ema20_slope = calc_ema_slope(indicators_1h['closes'], period=20, span=3)
-            # --- scoreを動的に計算する例 ---
-            score = 0
-            # 5分足RSIが35~38なら+1
-            if rsi_5m is not None and 35 <= rsi_5m <= 38:
-                score += 1
-            # 1時間足RSIが35~40で反発なら+1
-            if rsi_1h is not None and 35 <= rsi_1h <= 40 and rsi_1h > prev_rsi_1h:
-                score += 1
-            # BB下限付近なら+1
-            if bb_lower is not None and current_price <= bb_lower:
-                score += 1
-            # 強いトレンドなら+1
-            if is_strong_trend:
-                score += 1
-            # forbiddenならscore-1
-            forbidden = False  # forbidden未定義エラー対策
-            if forbidden:
-                score -= 1
-            # --- ログ出力追加 ---
-            try:
-                logger.info(
-                    f"H! forbidden=({forbidden}), "
-                    f"score=({score}), "
-                    f"rsi5m=({rsi_5m:.1f}), rsi1h=({rsi_1h:.1f}), bb_lower=({bb_lower}), price=({current_price})"
-                )
-            except Exception as e:
-                print(f"[WARN] logger.info出力失敗: {e}")
-            print("[INFO] 強いトレンド中のため逆張り買いを回避 (score計算済み)")
+        # 未定義変数・判定ロジック削除
 
 def compute_indicators_long(exchange, pair='BTC/JPY', timeframe='1h', limit=1000):
     # Fetch OHLCV and compute a set of indicators. Returns dict of values (may contain None).
@@ -2060,11 +1356,7 @@ def compute_indicators_long(exchange, pair='BTC/JPY', timeframe='1h', limit=1000
     # prepare lists
     closes = [float(r[4]) for r in raw if r and len(r) >= 5 and r[4] is not None]
     # 足データの本数と一部サンプルを表で表示
-    closes_sample = closes[:5] if len(closes) > 5 else closes
-    print_table([
-        [f"{timeframe}足closes本数", len(closes)],
-        [f"closesサンプル", closes_sample]
-    ], headers=["項目", "値"], color=Fore.BLUE)
+    # テーブル出力削除
     highs = [float(r[2]) for r in raw if r and len(r) >= 3 and r[2] is not None]
     lows = [float(r[3]) for r in raw if r and len(r) >= 4 and r[3] is not None]
 
@@ -2076,11 +1368,6 @@ def compute_indicators_long(exchange, pair='BTC/JPY', timeframe='1h', limit=1000
     indicators['atr_14'] = compute_atr(raw, period=14)
     # RSIリスト（反発判定用）
     if len(closes) >= 14:
-        # RSI計算前のclosesサンプルを表で表示
-        print_table([
-            ["RSI計算前closes本数", len(closes)],
-            ["closesサンプル", closes[:5] if len(closes) > 5 else closes]
-        ], headers=["項目", "値"], color=Fore.BLUE)
         rsi_list = []
         for i in range(len(closes)):
             if i+1 >= 14:
@@ -2088,11 +1375,6 @@ def compute_indicators_long(exchange, pair='BTC/JPY', timeframe='1h', limit=1000
                 rsi_list.append(rsi_val)
             else:
                 rsi_list.append(None)
-        # RSIリストの一部を表で表示
-        print_table([
-            ["RSIリスト本数", len(rsi_list)],
-            ["RSIリストサンプル", rsi_list[-5:] if len(rsi_list) > 5 else rsi_list]
-        ], headers=["項目", "値"], color=Fore.BLUE)
         indicators['rsi_list'] = rsi_list
         indicators['rsi_14'] = rsi_list[-1] if rsi_list else None
     else:
@@ -2176,15 +1458,16 @@ def get_latest_price(exchange, pair='BTC/JPY'):
     return None
 
 # --- 売買判定ロジック ---
-def trade_decision(current_price, btc_balance=0.0027, buy_btc=None, last_buy_price=None, rsi=None, bb_lower=None):
+def trade_decision(current_price, btc_balance=0.0027, buy_btc=None, last_buy_price=None, rsi=None, bb_lower=None, last_sell_price=None, ema_trend=None):
     # current_price: 現在のBTC/JPY価格
     # btc_balance: 現在のBTC総保有量
     # buy_btc: 売買対象のBTC量(全保有BTCの80%を推奨)
     # last_buy_price: 直近の買値(売却判定に使用)
     # rsi: 最新のRSI値
     # bb_lower: ボリンジャーバンド下限
-    # デバッグ用: 各値を出力
-    print(f"[DEBUG] trade_decision: current_price={current_price}, btc_balance={btc_balance}, last_buy_price={last_buy_price}, rsi={rsi}, bb_lower={bb_lower}")
+    # last_sell_price: 直近の売値
+    # ema_trend: EMAやトレンド判定（例: 'up', 'down', 'side'）
+    print(f"[DEBUG] trade_decision: current_price={current_price}, btc_balance={btc_balance}, last_buy_price={last_buy_price}, last_sell_price={last_sell_price}, rsi={rsi}, bb_lower={bb_lower}, ema_trend={ema_trend}")
     # ポジションの最初の買値を基準にする
     # 買い時のBTC量は全保有BTCの80%を使う
     if buy_btc is None:
@@ -2201,10 +1484,41 @@ def trade_decision(current_price, btc_balance=0.0027, buy_btc=None, last_buy_pri
     # fallback: last_buy_price
     if first_buy_price is None:
         first_buy_price = last_buy_price
-    # 利確（+10%）条件を削除。売りはトレーリングストップ・損切りのみ。
-    # 買い判定: BTC未保有、RSI<=35
+    # --- 直近売値・買値の制限 ---
+    # 買い判定: 直近売値より高い価格では買わない
     if btc_balance == 0 and (rsi is not None and rsi <= 35):
+        if last_sell_price is not None and current_price >= last_sell_price:
+            print(f"[INFO] 買い禁止: 直近売値({last_sell_price})以上での買いは不可")
+            return {'action': 'hold', 'amount': 0.0, 'price': current_price, 'buy_condition': False, 'sell_condition': False}
+        # トレンド判定: 上昇トレンド時のみ買い
+        if ema_trend is not None and ema_trend != 'up':
+            print(f"[INFO] 買い禁止: トレンドが上昇でないため買わない (ema_trend={ema_trend})")
+            return {'action': 'hold', 'amount': 0.0, 'price': current_price, 'buy_condition': False, 'sell_condition': False}
         return {'action': 'buy', 'amount': buy_btc, 'price': current_price, 'buy_condition': True}
+    # 売り判定: 直近買値より安い価格では売らない
+    # 追加条件: エントリー価格+5%以上、直近高値-5%以上
+    if btc_balance > 0 and (rsi is not None and rsi >= 70):
+        # 直近買値+5%未満なら売らない
+        if last_buy_price is not None and current_price < last_buy_price * 1.05:
+            print(f"[INFO] 売り禁止: エントリー価格+5%未満での売りは不可 (現在: {current_price}, 買値+5%: {last_buy_price * 1.05})")
+            return {'action': 'hold', 'amount': 0.0, 'price': current_price, 'buy_condition': False, 'sell_condition': False}
+        # 直近高値-5%未満なら売らない
+        recent_high = None
+        try:
+            import builtins
+            closes = getattr(builtins, 'price_history', None)
+            if closes and isinstance(closes, (list, tuple)) and len(closes) >= 20:
+                recent_high = max(closes[-20:])
+        except Exception:
+            pass
+        if recent_high is not None and current_price < recent_high * 0.95:
+            print(f"[INFO] 売り禁止: 直近高値-5%未満での売りは不可 (現在: {current_price}, 高値-5%: {recent_high * 0.95})")
+            return {'action': 'hold', 'amount': 0.0, 'price': current_price, 'buy_condition': False, 'sell_condition': False}
+        # トレンド判定: 下降トレンド時のみ売り
+        if ema_trend is not None and ema_trend != 'down':
+            print(f"[INFO] 売り禁止: トレンドが下降でないため売らない (ema_trend={ema_trend})")
+            return {'action': 'hold', 'amount': 0.0, 'price': current_price, 'buy_condition': False, 'sell_condition': False}
+        return {'action': 'sell', 'amount': buy_btc, 'price': current_price, 'sell_condition': True}
     # 何もしない
     return {'action': 'hold', 'amount': 0.0, 'price': current_price, 'buy_condition': False, 'sell_condition': False}
 
@@ -3492,8 +2806,6 @@ def run_bot(exchange, fund_manager, dry_run=False):
     try:
         print("[DEBUG] run_bot: while True直前", flush=True)
         while True:
-            print("[DEBUG] run_bot: print_15m_table呼び出し直前", flush=True)
-            print_15m_table(exchange)
             print("[DEBUG] run_bot: 15mテーブル出力直後", flush=True)
             # positions_state.json再読込
             try:
@@ -3524,103 +2836,11 @@ def run_bot(exchange, fund_manager, dry_run=False):
                     logging.error(f"現在価格取得エラー: {e}")
                 # --- 5分足EMA100傾き率による買い禁止判定 ---
                 try:
-                    indicators_5m = compute_indicators(exchange, pair='BTC/JPY', timeframe='5m', limit=300)
-                    logging.debug(f"5mインジケータ: {indicators_5m}")
+                    pass
                 except Exception as e:
                     logging.error(f"5mインジケータ取得エラー: {e}")
-                ema100_slope_5m = None
-                closes_5m = indicators_5m.get('closes', []) if indicators_5m else []
-                if closes_5m and len(closes_5m) >= 103:
-                    logging.debug(f"closes_5mサンプル: {closes_5m[:5]}")
-                    import numpy as np
-                    import talib
-                    ema100_now = float(talib.EMA(np.array(closes_5m), timeperiod=100)[-1])
-                    ema100_prev = float(talib.EMA(np.array(closes_5m[:-3]), timeperiod=100)[-1])
-                    ema100_slope_5m = (ema100_now - ema100_prev) / 3 / ema100_now
-                    logging.info(f"5m足EMA100傾き率: {ema100_slope_5m:.5f}")
-                    if ema100_slope_5m < -0.0015:
-                        logging.info(f"5分足EMA100傾き率が-0.15%未満（{ema100_slope_5m*100:.3f}%）のため買い禁止")
-                        # 買い判定をスキップ
-                        continue
-
-                # --- 5分足RSIで最終エントリー判定 ---
-                indicators_5m = compute_indicators(exchange, pair='BTC/JPY', timeframe='5m', limit=300)
-                rsi_5m = indicators_5m.get('rsi_14') if indicators_5m else None
-                closes_5m = indicators_5m.get('closes', []) if indicators_5m else []
-                ema20_5m = None
-                ema100_5m = None
-                ema100_slope_5m = None
-                if closes_5m and len(closes_5m) >= 103:
-                    import numpy as np
-                    import talib
-                    ema20_5m = float(talib.EMA(np.array(closes_5m), timeperiod=20)[-1])
-                    ema100_5m = float(talib.EMA(np.array(closes_5m), timeperiod=100)[-1])
-                    ema100_prev = float(talib.EMA(np.array(closes_5m[:-3]), timeperiod=100)[-1])
-                    ema100_slope_5m = (ema100_5m - ema100_prev) / 3 / ema100_5m
-                logging.info(f"5分足RSI: {rsi_5m}, EMA20: {ema20_5m}, EMA100: {ema100_5m}, EMA100傾き率: {ema100_slope_5m}")
-                # 売買判定
-                btc_balance = sum([float(pos.get('amount', 0)) for pos in positions])
-                # 5分足RSIが35～45ゾーン かつ 価格>EMA20 かつ EMA100傾き率>-0.15% でbuy
-                buy_signal = False
-                buy_skip_reason = []
-                now_ts = time.time()
-                # クールダウン判定
-                if last_buy_time is not None and (now_ts - last_buy_time) < COOLDOWN_SECONDS:
-                    buy_skip_reason.append(f"クールダウン中: 残り{int(COOLDOWN_SECONDS - (now_ts - last_buy_time))}秒")
-                if btc_balance != 0:
-                    buy_skip_reason.append("既にポジション保有中")
-                if rsi_5m is None or not (35 <= rsi_5m <= 45):
-                    buy_skip_reason.append(f"5分足RSIが範囲外: {rsi_5m}")
-                if closes_5m is None or len(closes_5m) == 0:
-                    buy_skip_reason.append("クローズ価格データ不足")
-                if ema20_5m is None:
-                    buy_skip_reason.append("EMA20未計算")
-                if ema100_slope_5m is None:
-                    buy_skip_reason.append("EMA100傾き未計算")
-                price_now = closes_5m[-1] if closes_5m and len(closes_5m) > 0 else None
-                if price_now is not None and ema20_5m is not None and ema100_slope_5m is not None:
-                    if price_now > ema20_5m and ema100_slope_5m > -0.0015:
-                        if btc_balance == 0 and rsi_5m is not None and 35 <= rsi_5m <= 45 and (last_buy_time is None or (now_ts - last_buy_time) >= COOLDOWN_SECONDS):
-                            buy_signal = True
-                        else:
-                            if last_buy_time is not None and (now_ts - last_buy_time) < COOLDOWN_SECONDS:
-                                buy_skip_reason.append(f"クールダウン中: 残り{int(COOLDOWN_SECONDS - (now_ts - last_buy_time))}秒")
-                    else:
-                        if price_now <= ema20_5m:
-                            buy_skip_reason.append(f"現在価格({price_now})がEMA20({ema20_5m})以下")
-                        if ema100_slope_5m <= -0.0015:
-                            buy_skip_reason.append(f"EMA100傾き率({ema100_slope_5m*100:.3f}%)が-0.15%未満")
-                td = {'action': 'buy' if buy_signal else 'hold', 'amount': MIN_ORDER_BTC if buy_signal else 0.0, 'price': current_price, 'buy_condition': buy_signal}
-                logging.info(f"trade_decision result: {td}")
-                if not buy_signal:
-                    logging.info("買い見送り理由: " + ", ".join(buy_skip_reason))
-                if td.get('action') == 'sell':
-                    logging.info("売り判定: 条件成立")
-                    # 売り注文を実行
-                    try:
-                        # ポジション全て売却
-                        sell_results = sell_all_positions(positions, exchange, PAIR)
-                        logging.info(f"売却結果: {sell_results}")
-                        # ポジション情報をクリア
-                        positions = []
-                        set_last_buy_price(state, None)
-                        # 保存
-                        save_data = {
-                            "positions": positions,
-                            "last_buy_price": get_last_buy_price(state)
-                        }
-                        with open(positions_file, 'w', encoding='utf-8') as f:
-                            json.dump(save_data, f, ensure_ascii=False, indent=2)
-                        logging.info("売却後、ポジション情報クリア・保存")
-                    except Exception as e:
-                        logging.error(f"売却処理例外: {e}")
-                elif td.get('action') == 'buy':
-                    logging.info("買い判定: 5分足RSI<=35でエントリー")
-                    # ここで買い注文ロジックを実行（既存のbuyロジックを流用）
-                    # ...既存のbuyロジック...
-                    last_buy_time = time.time()  # 買い注文時刻を記録
-                else:
-                    logging.info("買い判定: 条件不成立（5分足RSIフィルタ）")
+                # 未定義変数参照削除
+                pass
             except Exception as e:
                 logging.error(f"positionsファイル読み込み例外: {e}")
             logging.info("ループ末尾: sleep前")
@@ -3661,7 +2881,6 @@ def run_bot(exchange, fund_manager, dry_run=False):
 
     # ポジション情報とlast_buy_priceの保存
     try:
-        print("print_15m_table() in", flush=True)
         # last_buy_priceも一緒に保存
         save_obj = updated_positions.copy()
         # last_buy_priceを別ファイルやpositions_state.jsonに保存したい場合は下記のように拡張可能
