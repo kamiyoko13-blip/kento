@@ -1,3 +1,129 @@
+def cleanup_trade_history(days=7):
+    """trade_history.jsonからdays日以上前の履歴を削除する"""
+    import os, json, datetime
+    trade_log_file = os.path.abspath(os.path.join(os.path.dirname(__file__), 'trade_history.json'))
+    if not os.path.exists(trade_log_file):
+        return
+    try:
+        with open(trade_log_file, 'r', encoding='utf-8') as f:
+            logs = json.load(f)
+        now = datetime.datetime.now()
+        cutoff = now - datetime.timedelta(days=days)
+        def is_recent(entry):
+            ts = entry.get('timestamp')
+            if not ts:
+                return True  # タイムスタンプがなければ消さない
+            try:
+                dt = datetime.datetime.fromisoformat(ts)
+                return dt >= cutoff
+            except Exception:
+                return True
+        new_logs = [e for e in logs if is_recent(e)]
+        if len(new_logs) < len(logs):
+            with open(trade_log_file, 'w', encoding='utf-8') as f:
+                json.dump(new_logs, f, ensure_ascii=False, indent=2)
+            print(f"[INFO] trade_history.json: {len(logs)-len(new_logs)}件の古い履歴を削除しました")
+    except Exception as e:
+        print(f"[ERROR] trade_history.jsonクリーンアップ失敗: {e}")
+# --- ターミナルで指標やシグナルを色付きで表示するユーティリティ ---
+from colorama import Fore, Style
+import numpy as np
+from collections import deque
+import time
+import ccxt
+import os
+import json
+import pandas as pd
+
+def colorize_value(value, kind='rsi'):
+    """
+    指標値に応じて色を返す（RSI, BB, EMA, シグナル）
+    kind: 'rsi', 'bb', 'ema', 'signal'
+    """
+    if kind == 'rsi':
+        if value is None:
+            return f"{Style.DIM}--{Style.RESET_ALL}"
+        if value < 30:
+            return f"{Fore.CYAN}{value:.2f}{Style.RESET_ALL}"
+        elif value > 70:
+            return f"{Fore.MAGENTA}{value:.2f}{Style.RESET_ALL}"
+        else:
+            return f"{Fore.GREEN}{value:.2f}{Style.RESET_ALL}"
+    elif kind == 'signal':
+        if value == 'buy':
+            return f"{Fore.CYAN}BUY{Style.RESET_ALL}"
+        elif value == 'sell_all':
+            return f"{Fore.MAGENTA}SELL{Style.RESET_ALL}"
+        elif value == 'hold':
+            return f"{Fore.YELLOW}HOLD{Style.RESET_ALL}"
+        else:
+            return f"{Style.DIM}{value}{Style.RESET_ALL}"
+    elif kind == 'bb':
+        # BBは上下で色分け
+        return f"{Fore.BLUE}{value:.2f}{Style.RESET_ALL}"
+    elif kind == 'ema':
+        return f"{Fore.LIGHTYELLOW_EX}{value:.2f}{Style.RESET_ALL}"
+    else:
+        return str(value)
+
+def print_colored_indicators(timeframe, rsi, ema, bb_upper, bb_middle, bb_lower, signal=None):
+    # タイムフレームごとに色を変える
+    if timeframe == '1h':
+        tf_color = Fore.GREEN
+    elif timeframe == '15m':
+        tf_color = Fore.BLUE
+    elif timeframe == '5m':
+        tf_color = Fore.YELLOW
+    else:
+        tf_color = Style.RESET_ALL
+
+    def safe_colorize(val, kind):
+        if val is None:
+            return f"{Fore.LIGHTBLACK_EX}データ不足{Style.RESET_ALL}"
+        try:
+            return colorize_value(val, kind)
+        except Exception:
+            return f"{Fore.LIGHTBLACK_EX}ERR{Style.RESET_ALL}"
+
+    # 売買判断は常に黄色
+    signal_str = f"{Fore.YELLOW}{signal.upper() if signal else ''}{Style.RESET_ALL}" if signal else ''
+    print(f"{tf_color}[{timeframe}]{Style.RESET_ALL} "
+          f"RSI: {safe_colorize(rsi, 'rsi')}  "
+          f"EMA: {safe_colorize(ema, 'ema')}  "
+          f"BB: {safe_colorize(bb_lower, 'bb')} - {safe_colorize(bb_middle, 'bb')} - {safe_colorize(bb_upper, 'bb')}  "
+          f"SIGNAL: {signal_str}")
+# --- 1分足OHLCVからテクニカル指標を計算する関数群 ---
+def calc_rsi_from_ohlcv(ohlcv_df, period=14):
+    """DataFrameからRSIを計算し、最新値を返す"""
+    import numpy as np
+    if ohlcv_df is None or len(ohlcv_df) < period:
+        return None
+    close = ohlcv_df['close']
+    delta = close.diff()
+    up = delta.clip(lower=0)
+    down = -delta.clip(upper=0)
+    ma_up = up.rolling(window=period, min_periods=period).mean()
+    ma_down = down.rolling(window=period, min_periods=period).mean()
+    rsi = 100 - (100 / (1 + ma_up / ma_down))
+    return rsi.iloc[-1] if not rsi.isnull().all() else None
+
+def calc_ema_from_ohlcv(ohlcv_df, period=20):
+    """DataFrameからEMAを計算し、最新値を返す"""
+    if ohlcv_df is None or len(ohlcv_df) < period:
+        return None
+    ema = ohlcv_df['close'].ewm(span=period, adjust=False).mean()
+    return ema.iloc[-1] if not ema.isnull().all() else None
+
+def calc_bb_from_ohlcv(ohlcv_df, period=20, num_std=2):
+    """DataFrameからボリンジャーバンド（上・中・下）を計算し、最新値を返す"""
+    if ohlcv_df is None or len(ohlcv_df) < period:
+        return None, None, None
+    close = ohlcv_df['close']
+    ma = close.rolling(window=period).mean()
+    std = close.rolling(window=period).std()
+    upper = ma + num_std * std
+    lower = ma - num_std * std
+    return upper.iloc[-1], ma.iloc[-1], lower.iloc[-1]
 # --- .envファイルから環境変数を自動ロード ---
 from dotenv import load_dotenv
 load_dotenv()
@@ -128,6 +254,8 @@ def on_ws_message_depth(ws, message):
         print(f"[WebSocket ERROR] {e}")
 
 def start_bitbank_ws_depth():
+    # ループ開始時に古い履歴をクリーンアップ
+    cleanup_trade_history(days=7)
     while True:
         try:
             ws_url = "wss://stream.bitbank.cc/socket.io/?EIO=3&transport=websocket"
@@ -147,11 +275,14 @@ import websocket
 import json
 
 latest_ws_price = None  # グローバルで最新価格を保持
+# --- 1分足OHLCVビルダーをグローバルで用意 ---
+ohlcv_builder = None
 
 def on_ws_message(ws, message):
-    global latest_ws_price
+    global latest_ws_price, ohlcv_builder
     try:
-        print(f"[WebSocket RAW] {repr(message)}")
+        # --- 価格受信時にOHLCVビルダーへ反映 ---
+        # print(f"[WebSocket RAW] {repr(message)}")
         # Socket.IO '40'（connect）受信時に購読リクエストを送信
         if message == '40':
             subscribe_msg = '42["subscribe", {"channel": "ticker_btc_jpy"}]'
@@ -166,11 +297,14 @@ def on_ws_message(ws, message):
         if msg.startswith('42'):
             try:
                 arr = json.loads(msg[2:])
-                print(f"[WebSocket PARSED] {repr(arr)}")
+                # print(f"[WebSocket PARSED] {repr(arr)}")
                 # ['channel', {...}] の形式
                 if isinstance(arr, list) and len(arr) == 2 and arr[0] == 'ticker_btc_jpy':
                     data = arr[1]
                     latest_ws_price = float(data['last'])
+                    # --- ここでOHLCVビルダーに価格を渡す ---
+                    if ohlcv_builder is not None:
+                        ohlcv_builder.update(latest_ws_price)
                     print(f"[WebSocket] 現在価格: {latest_ws_price}")
                 return
             except Exception as e:
@@ -182,6 +316,8 @@ def on_ws_message(ws, message):
             print(f"[WebSocket PARSED] {repr(data)}")
             if isinstance(data, dict) and data.get('channel') == 'ticker_btc_jpy':
                 latest_ws_price = float(data['data']['last'])
+                if ohlcv_builder is not None:
+                    ohlcv_builder.update(latest_ws_price)
                 print(f"[WebSocket] 現在価格: {latest_ws_price}")
             else:
                 print(f"[WebSocket INFO] 受信データはdict型でない、またはchannelが一致しません: {type(data)}")
@@ -192,6 +328,10 @@ def on_ws_message(ws, message):
 
 
 def start_bitbank_ws():
+    global ohlcv_builder
+    # --- OHLCVビルダーを初期化 ---
+    if ohlcv_builder is None:
+        ohlcv_builder = RealtimeOHLCVBuilder(interval_sec=60, max_bars=500)
     while True:
         try:
             ws_url = "wss://stream.bitbank.cc/socket.io/?EIO=3&transport=websocket"
@@ -298,6 +438,57 @@ def resample_ohlcv_5m_to_1h(ohlcv_5m):
 def set_last_buy_price(state, price):
     state["last_buy_price"] = price
 # 必要な外部ライブラリのimport
+import threading
+import time
+
+# --- WebSocketの最新価格から1分足OHLCVを自動生成するクラス ---
+class RealtimeOHLCVBuilder:
+    """
+    WebSocketの最新価格から1分足OHLCVを自動生成し、DataFrameに蓄積するクラス
+    """
+    def __init__(self, interval_sec=60, max_bars=500):
+        self.interval_sec = interval_sec  # 1分足なら60
+        self.max_bars = max_bars
+        self.ohlcv = []  # [timestamp, open, high, low, close, volume]
+        self.current_bar = None
+        self.last_bar_time = None
+        self.lock = threading.Lock()
+
+    def update(self, price, volume=0.0):
+        now = int(time.time())
+        bar_time = now - (now % self.interval_sec)
+        with self.lock:
+            if self.last_bar_time != bar_time:
+                # 新しいバー開始
+                if self.current_bar:
+                    self.ohlcv.append(self.current_bar)
+                    if len(self.ohlcv) > self.max_bars:
+                        self.ohlcv.pop(0)
+                self.current_bar = [bar_time * 1000, price, price, price, price, volume]
+                self.last_bar_time = bar_time
+            else:
+                # 既存バー更新
+                self.current_bar[2] = max(self.current_bar[2], price)  # high
+                self.current_bar[3] = min(self.current_bar[3], price)  # low
+                self.current_bar[4] = price  # close
+                self.current_bar[5] += volume  # volume加算
+
+    def get_ohlcv(self):
+        with self.lock:
+            bars = list(self.ohlcv)
+            if self.current_bar:
+                bars.append(self.current_bar)
+            return bars
+
+    def to_dataframe(self):
+        import pandas as pd
+        bars = self.get_ohlcv()
+        if not bars:
+            return pd.DataFrame()
+        df = pd.DataFrame(bars, columns=["timestamp", "open", "high", "low", "close", "volume"])
+        df["datetime"] = pd.to_datetime(df["timestamp"], unit="ms")
+        df.set_index("datetime", inplace=True)
+        return df
 import pandas as pd
 import matplotlib.pyplot as plt
 # === ログ出力の本物実装 ===
@@ -486,20 +677,65 @@ def create_bitbank_exchange():
 
 
 def run_bot(exchange, fund_manager, dry_run=False):
+    # --- 1h, 15m, 5m足のテクニカル指標を色付きで表示 ---
+    try:
+        import pandas as pd
+        # 1時間足
+        ohlcv_1h_api = exchange.fetch_ohlcv('BTC/JPY', timeframe='1h', limit=30)
+        if ohlcv_1h_api and len(ohlcv_1h_api) > 0:
+            ohlcv_1h = ohlcv_1h_api
+            df_1h = pd.DataFrame(ohlcv_1h, columns=["timestamp", "open", "high", "low", "close", "volume"])
+            df_1h["datetime"] = pd.to_datetime(df_1h["timestamp"], unit="ms")
+            df_1h.set_index("datetime", inplace=True)
+        else:
+            print("[WARN] 1h足APIデータが取得できなかったため、5分足から合成します")
+            ohlcv_5m_for_1h = exchange.fetch_ohlcv('BTC/JPY', timeframe='5m', limit=300)
+            ohlcv_1h = resample_ohlcv_5m_to_1h(ohlcv_5m_for_1h)
+            if not ohlcv_1h or len(ohlcv_1h) < 1:
+                print("[ERROR] 1h足データ取得・合成失敗")
+                df_1h = None
+            else:
+                df_1h = pd.DataFrame(ohlcv_1h, columns=["timestamp", "open", "high", "low", "close", "volume"])
+                df_1h["datetime"] = pd.to_datetime(df_1h["timestamp"], unit="ms")
+                df_1h.set_index("datetime", inplace=True)
+        rsi_1h = calc_rsi_from_ohlcv(df_1h, period=14) if df_1h is not None else None
+        ema_1h = calc_ema_from_ohlcv(df_1h, period=20) if df_1h is not None else None
+        bb_upper_1h, bb_middle_1h, bb_lower_1h = calc_bb_from_ohlcv(df_1h, period=20, num_std=2) if df_1h is not None else (None, None, None)
+        print_colored_indicators('1h', rsi_1h, ema_1h, bb_upper_1h, bb_middle_1h, bb_lower_1h)
+
+        # 15分足
+        ohlcv_15m = exchange.fetch_ohlcv('BTC/JPY', timeframe='15m', limit=30)
+        df_15m = pd.DataFrame(ohlcv_15m, columns=["timestamp", "open", "high", "low", "close", "volume"])
+        df_15m["datetime"] = pd.to_datetime(df_15m["timestamp"], unit="ms")
+        df_15m.set_index("datetime", inplace=True)
+        rsi_15m = calc_rsi_from_ohlcv(df_15m, period=14)
+        ema_15m = calc_ema_from_ohlcv(df_15m, period=20)
+        bb_upper_15m, bb_middle_15m, bb_lower_15m = calc_bb_from_ohlcv(df_15m, period=20, num_std=2)
+        print_colored_indicators('15m', rsi_15m, ema_15m, bb_upper_15m, bb_middle_15m, bb_lower_15m)
+
+        # 5分足
+        ohlcv_5m = exchange.fetch_ohlcv('BTC/JPY', timeframe='5m', limit=30)
+        df_5m = pd.DataFrame(ohlcv_5m, columns=["timestamp", "open", "high", "low", "close", "volume"])
+        df_5m["datetime"] = pd.to_datetime(df_5m["timestamp"], unit="ms")
+        df_5m.set_index("datetime", inplace=True)
+        rsi_5m = calc_rsi_from_ohlcv(df_5m, period=14)
+        ema_5m = calc_ema_from_ohlcv(df_5m, period=20)
+        bb_upper_5m, bb_middle_5m, bb_lower_5m = calc_bb_from_ohlcv(df_5m, period=20, num_std=2)
+        print_colored_indicators('5m', rsi_5m, ema_5m, bb_upper_5m, bb_middle_5m, bb_lower_5m)
+    except Exception as e:
+        print(f"[ERROR] テクニカル指標表示エラー: {e}")
     # --- リアルタイム価格の履歴を保持するリスト ---
-    import numpy as np
-    from collections import deque
     price_history = deque(maxlen=300)
-    RSI_PERIOD = 14
+    RSI_PERIOD = 14  # 標準的なRSI期間に戻す
     rsi_buy_flag = False
-    import time
     PAIR = 'BTC/JPY'
     MIN_ORDER_BTC = 0.001
-    import json
     positions_file = 'positions_state.json'
     state = {}
     positions = []
     last_buy_price = None
+    # 初期化時に直近売値を指定値でセット
+    last_sell_price = 10151701
     if os.path.exists(positions_file):
         try:
             with open(positions_file, 'r', encoding='utf-8') as f:
@@ -533,8 +769,8 @@ def run_bot(exchange, fund_manager, dry_run=False):
 
         # --- 自作RSI計算（WebSocket価格履歴から） ---
         rsi = None
-        if len(price_history) >= RSI_PERIOD + 1:
-            closes = np.array(price_history)[-RSI_PERIOD-1:]
+        if len(price_history) >= RSI_PERIOD:
+            closes = np.array(price_history)[-RSI_PERIOD:]
             deltas = np.diff(closes)
             gains = np.where(deltas > 0, deltas, 0)
             losses = np.where(deltas < 0, -deltas, 0)
@@ -550,14 +786,14 @@ def run_bot(exchange, fund_manager, dry_run=False):
         last_buy_price = None
         last_sell_price = None
         try:
-            import json
             if os.path.exists('trade_history.json'):
                 with open('trade_history.json', 'r', encoding='utf-8') as f:
                     logs = json.load(f)
+                # 最新のbuy/sell両方を必ず復元
                 for entry in reversed(logs):
-                    if entry.get('action') == 'buy' and last_buy_price is None:
+                    if last_buy_price is None and entry.get('action') == 'buy':
                         last_buy_price = float(entry.get('price', 0))
-                    if entry.get('action') == 'sell' and last_sell_price is None:
+                    if last_sell_price is None and entry.get('action') == 'sell':
                         last_sell_price = float(entry.get('price', 0))
                     if last_buy_price is not None and last_sell_price is not None:
                         break
@@ -570,7 +806,6 @@ def run_bot(exchange, fund_manager, dry_run=False):
             closes = list(price_history)
             if len(closes) >= 23:
                 import talib
-                import numpy as np
                 ema20_now = float(talib.EMA(np.array(closes), timeperiod=20)[-1])
                 ema20_prev = float(talib.EMA(np.array(closes[:-3]), timeperiod=20)[-1])
                 ema20_slope = (ema20_now - ema20_prev) / 3
@@ -585,12 +820,27 @@ def run_bot(exchange, fund_manager, dry_run=False):
 
         # --- trade_decision呼び出し ---
         td = trade_decision(current_price, btc_balance=0, buy_btc=None, last_buy_price=last_buy_price, rsi=rsi, bb_lower=None, last_sell_price=last_sell_price, ema_trend=ema_trend)
+
+        # --- 日本語で売買内容を色付きで表示 ---
+        from colorama import Fore, Style
+        action = td.get('action')
+        amount = td.get('amount')
+        price = td.get('price')
+        if action == 'buy':
+            print(f"{Fore.CYAN}【買いシグナル】{price:.0f}円で{amount}BTCを購入します！{Style.RESET_ALL}")
+        elif action == 'sell':
+            print(f"{Fore.MAGENTA}【売りシグナル】{price:.0f}円で{amount}BTCを売却します！{Style.RESET_ALL}")
+        elif action == 'hold':
+            print(f"{Fore.YELLOW}【ホールド】売買なし（様子見中）{Style.RESET_ALL}")
+        else:
+            print(f"{Fore.LIGHTBLACK_EX}【シグナル】{action}（詳細: {td}）{Style.RESET_ALL}")
         print(f"[INFO] trade_decision結果: {td}")
 
         # --- 実際の売買処理はここに（省略/既存ロジックと統合可） ---
         # 例: if td['action'] == 'buy': ...
 
-        time.sleep(1)
+        time.sleep(30)
+
 def get_last_buy_price(state):
     return state.get('last_buy_price', None)
 
@@ -909,64 +1159,65 @@ def cancel_order(exchange, order_id, pair='BTC/JPY'):
                 closes_15m_sample = "データ不足"
             # テーブル出力削除
 
-    try:
-        # --- シグナル判定 ---
-        print("[DEBUG] run_bot: generate_signals呼び出し前")
-        ohlcv_1h = exchange.fetch_ohlcv('BTC/JPY', timeframe='1h', limit=300)
-        if not ohlcv_1h or len(ohlcv_1h) < 15:
-            print(f"[WARN] 1時間足OHLCVデータが{len(ohlcv_1h) if ohlcv_1h else 0}本しかありません。5分足から合成します")
-            ohlcv_5m = exchange.fetch_ohlcv('BTC/JPY', timeframe='5m', limit=300)
-            ohlcv_1h = resample_ohlcv_5m_to_1h(ohlcv_5m)
-            print(f"[DEBUG] 合成後の1時間足: {ohlcv_1h[:3]} ... total={len(ohlcv_1h)}")
-        # シグナル生成
-        df_1h = {'closes': [float(r[4]) for r in ohlcv_1h if r and len(r) >= 5 and r[4] is not None]}
-        signal, message = generate_signals(df_1h)
-        print(f"[DEBUG] run_bot: シグナル={signal}, メッセージ={message}")
-        sell_signal = signal == 'sell_all'
-        print(f"[INFO] シグナル: {signal}, 理由: {message}")
-
-        # --- 買いシグナル時にメール通知 ---
-        if signal == 'buy':
-            send_notification(
-                smtp_host, smtp_port, smtp_user, smtp_password, to_email,
-                "【BTC自動売買】買いシグナル発生", f"買い時です！理由: {message}"
-            )
-            # 日本円残高取得
-            free_jpy = None
-            try:
-                balance = exchange.fetch_balance()
-                free_jpy = balance.get('free', {}).get('JPY', None)
-            except Exception as e:
-                print(f"[ERROR] JPY残高取得エラー: {e}")
-            # 85%でBTC購入
-            if free_jpy and price_now:
-                btc_amount = round((free_jpy * 0.85) / price_now, 8)
-                order_result = execute_order(exchange, 'BTC/JPY', 'buy', btc_amount, price_now)
-                if order_result and not order_result.get('error'):
-                    send_notification(
-                        smtp_host, smtp_port, smtp_user, smtp_password, to_email,
-                        "【BTC自動売買】買いました", f"BTCを購入しました。注文詳細: {order_result}"
-                    )
-        # --- 売りシグナル時はBTC全量売却 ---
-        if signal == 'sell_all':
-            # BTC残高取得
-            btc_balance = None
-            try:
-                balance = exchange.fetch_balance()
-                btc_balance = balance.get('free', {}).get('BTC', None)
-            except Exception as e:
-                print(f"[ERROR] BTC残高取得エラー: {e}")
-            if btc_balance and price_now:
-                order_result = execute_order(exchange, 'BTC/JPY', 'sell', btc_balance, price_now)
-                if order_result and not order_result.get('error'):
-                    send_notification(
-                        smtp_host, smtp_port, smtp_user, smtp_password, to_email,
-                        "【BTC自動売買】売りました", f"BTCを全量売却しました。注文詳細: {order_result}"
-                    )
-    except Exception as e:
-        print(f"[ERROR] run_bot例外: {e}")
-        import traceback
-        traceback.print_exc()
+    # --- 旧: シグナルによる直接注文部分はコメントアウト（trade_decisionのみで注文を出す） ---
+    # try:
+    #     # --- シグナル判定 ---
+    #     print("[DEBUG] run_bot: generate_signals呼び出し前")
+    #     ohlcv_1h = exchange.fetch_ohlcv('BTC/JPY', timeframe='1h', limit=300)
+    #     if not ohlcv_1h or len(ohlcv_1h) < 15:
+    #         print(f"[WARN] 1時間足OHLCVデータが{len(ohlcv_1h) if ohlcv_1h else 0}本しかありません。5分足から合成します")
+    #         ohlcv_5m = exchange.fetch_ohlcv('BTC/JPY', timeframe='5m', limit=300)
+    #         ohlcv_1h = resample_ohlcv_5m_to_1h(ohlcv_5m)
+    #         print(f"[DEBUG] 合成後の1時間足: {ohlcv_1h[:3]} ... total={len(ohlcv_1h)}")
+    #     # シグナル生成
+    #     df_1h = {'closes': [float(r[4]) for r in ohlcv_1h if r and len(r) >= 5 and r[4] is not None]}
+    #     signal, message = generate_signals(df_1h)
+    #     print(f"[DEBUG] run_bot: シグナル={signal}, メッセージ={message}")
+    #     sell_signal = signal == 'sell_all'
+    #     print(f"[INFO] シグナル: {signal}, 理由: {message}")
+    #
+    #     # --- 買いシグナル時にメール通知 ---
+    #     if signal == 'buy':
+    #         send_notification(
+    #             smtp_host, smtp_port, smtp_user, smtp_password, to_email,
+    #             "【BTC自動売買】買いシグナル発生", f"買い時です！理由: {message}"
+    #         )
+    #         # 日本円残高取得
+    #         free_jpy = None
+    #         try:
+    #             balance = exchange.fetch_balance()
+    #             free_jpy = balance.get('free', {}).get('JPY', None)
+    #         except Exception as e:
+    #             print(f"[ERROR] JPY残高取得エラー: {e}")
+    #         # 85%でBTC購入
+    #         if free_jpy and price_now:
+    #             btc_amount = round((free_jpy * 0.85) / price_now, 8)
+    #             order_result = execute_order(exchange, 'BTC/JPY', 'buy', btc_amount, price_now)
+    #             if order_result and not order_result.get('error'):
+    #                 send_notification(
+    #                     smtp_host, smtp_port, smtp_user, smtp_password, to_email,
+    #                     "【BTC自動売買】買いました", f"BTCを購入しました。注文詳細: {order_result}"
+    #                 )
+    #     # --- 売りシグナル時はBTC全量売却 ---
+    #     if signal == 'sell_all':
+    #         # BTC残高取得
+    #         btc_balance = None
+    #         try:
+    #             balance = exchange.fetch_balance()
+    #             btc_balance = balance.get('free', {}).get('BTC', None)
+    #         except Exception as e:
+    #             print(f"[ERROR] BTC残高取得エラー: {e}")
+    #         if btc_balance and price_now:
+    #             order_result = execute_order(exchange, 'BTC/JPY', 'sell', btc_balance, price_now)
+    #             if order_result and not order_result.get('error'):
+    #                 send_notification(
+    #                     smtp_host, smtp_port, smtp_user, smtp_password, to_email,
+    #                     "【BTC自動売買】売りました", f"BTCを全量売却しました。注文詳細: {order_result}"
+    #                 )
+    # except Exception as e:
+    #     print(f"[ERROR] run_bot例外: {e}")
+    #     import traceback
+    #     traceback.print_exc()
 
 
 import smtplib
@@ -1115,10 +1366,79 @@ def send_notification(smtp_host, smtp_port, smtp_user, smtp_password, to_email, 
 
     buy_signal = False
     sell_signal = False
+
     while True:
         sell_signal = False
         buy_signal = False
         sell_signal = False
+        # --- 各タイムフレームのテクニカル指標を色付きで表示 ---
+        try:
+            # 1分足（WebSocket由来）
+            global ohlcv_builder
+            if ohlcv_builder is not None:
+                df_ohlcv = ohlcv_builder.to_dataframe()
+                rsi_1m = calc_rsi_from_ohlcv(df_ohlcv, period=14)
+                ema_1m = calc_ema_from_ohlcv(df_ohlcv, period=20)
+                bb_upper, bb_middle, bb_lower = calc_bb_from_ohlcv(df_ohlcv, period=20, num_std=2)
+                signal = None
+                if rsi_1m is not None:
+                    if rsi_1m < 30:
+                        signal = 'buy'
+                    elif rsi_1m > 70:
+                        signal = 'sell_all'
+                    else:
+                        signal = 'hold'
+                print_colored_indicators('1m', rsi_1m, ema_1m, bb_upper, bb_middle, bb_lower, signal)
+                # 通知
+                smtp_host = os.getenv('SMTP_HOST')
+                smtp_port = int(os.getenv('SMTP_PORT', '465'))
+                smtp_user = os.getenv('SMTP_USER')
+                smtp_password = os.getenv('SMTP_PASS')
+                to_email = os.getenv('TO_EMAIL')
+                now = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                if signal == 'buy' and smtp_host and to_email:
+                    subject = f"【1分足シグナル】買い {now}"
+                    message = f"1分足RSI={rsi_1m:.2f}\nEMA={ema_1m:.2f if ema_1m else 0}\nBB: {bb_lower:.2f if bb_lower else 0} - {bb_middle:.2f if bb_middle else 0} - {bb_upper:.2f if bb_upper else 0}"
+                    send_notification(smtp_host, smtp_port, smtp_user, smtp_password, to_email, subject, message)
+                if signal == 'sell_all' and smtp_host and to_email:
+                    subject = f"【1分足シグナル】売り {now}"
+                    message = f"1分足RSI={rsi_1m:.2f}\nEMA={ema_1m:.2f if ema_1m else 0}\nBB: {bb_lower:.2f if bb_lower else 0} - {bb_middle:.2f if bb_middle else 0} - {bb_upper:.2f if bb_upper else 0}"
+                    send_notification(smtp_host, smtp_port, smtp_user, smtp_password, to_email, subject, message)
+
+            # 1時間足
+            ohlcv_1h = exchange.fetch_ohlcv('BTC/JPY', timeframe='1h', limit=30)
+            import pandas as pd
+            df_1h = pd.DataFrame(ohlcv_1h, columns=["timestamp", "open", "high", "low", "close", "volume"])
+            df_1h["datetime"] = pd.to_datetime(df_1h["timestamp"], unit="ms")
+            df_1h.set_index("datetime", inplace=True)
+            rsi_1h = calc_rsi_from_ohlcv(df_1h, period=14)
+            ema_1h = calc_ema_from_ohlcv(df_1h, period=20)
+            bb_upper_1h, bb_middle_1h, bb_lower_1h = calc_bb_from_ohlcv(df_1h, period=20, num_std=2)
+            print_colored_indicators('1h', rsi_1h, ema_1h, bb_upper_1h, bb_middle_1h, bb_lower_1h)
+
+            # 15分足
+            ohlcv_15m = exchange.fetch_ohlcv('BTC/JPY', timeframe='15m', limit=30)
+            df_15m = pd.DataFrame(ohlcv_15m, columns=["timestamp", "open", "high", "low", "close", "volume"])
+            df_15m["datetime"] = pd.to_datetime(df_15m["timestamp"], unit="ms")
+            df_15m.set_index("datetime", inplace=True)
+            rsi_15m = calc_rsi_from_ohlcv(df_15m, period=14)
+            ema_15m = calc_ema_from_ohlcv(df_15m, period=20)
+            bb_upper_15m, bb_middle_15m, bb_lower_15m = calc_bb_from_ohlcv(df_15m, period=20, num_std=2)
+            print_colored_indicators('15m', rsi_15m, ema_15m, bb_upper_15m, bb_middle_15m, bb_lower_15m)
+
+            # 5分足
+            ohlcv_5m = exchange.fetch_ohlcv('BTC/JPY', timeframe='5m', limit=30)
+            df_5m = pd.DataFrame(ohlcv_5m, columns=["timestamp", "open", "high", "low", "close", "volume"])
+            df_5m["datetime"] = pd.to_datetime(df_5m["timestamp"], unit="ms")
+            df_5m.set_index("datetime", inplace=True)
+            rsi_5m = calc_rsi_from_ohlcv(df_5m, period=14)
+            ema_5m = calc_ema_from_ohlcv(df_5m, period=20)
+            bb_upper_5m, bb_middle_5m, bb_lower_5m = calc_bb_from_ohlcv(df_5m, period=20, num_std=2)
+            print_colored_indicators('5m', rsi_5m, ema_5m, bb_upper_5m, bb_middle_5m, bb_lower_5m)
+
+        except Exception as e:
+            print(f"[ERROR] テクニカル指標表示エラー: {e}")
+        # 30秒ごとに更新
         time.sleep(30)
 
         # --- positions_state.jsonの再読込・保存・売買判定・注文・通知ロジックをここで統合 ---
@@ -1155,7 +1475,17 @@ def send_notification(smtp_host, smtp_port, smtp_user, smtp_password, to_email, 
             builtins.positions = positions
 
             # インジケータ取得・判定ロジック削除
-            td = trade_decision(current_price, btc_balance, MIN_ORDER_BTC, last_buy_price, None, None)
+            # JPY残高取得
+            try:
+                balance = exchange.fetch_balance()
+                jpy_balance = float(balance['total'].get('JPY', 0))
+            except Exception as e:
+                print(f"[ERROR] JPY残高取得失敗: {e}")
+                jpy_balance = None
+            # RSI履歴（例としてNoneを渡す。必要に応じて実データに変更可）
+            rsi_history = None
+            pair = PAIR
+            td = trade_decision(current_price, btc_balance, MIN_ORDER_BTC, last_buy_price, None, None, jpy_balance=jpy_balance, rsi_history=rsi_history, pair=pair)
 
             # --- メール通知ロジック ---
             smtp_host = os.getenv('SMTP_HOST')
@@ -1175,9 +1505,10 @@ def send_notification(smtp_host, smtp_port, smtp_user, smtp_password, to_email, 
                         if order and order.get('status') in ('closed', 'filled'):
                             positions = []
                             set_last_buy_price(state, None)
+                            # 最新状態でファイルを上書き
                             save_data = {
                                 "positions": positions,
-                                "last_buy_price": get_last_buy_price(state)
+                                "last_buy_price": None
                             }
                             with open(positions_file, 'w', encoding='utf-8') as f:
                                 json.dump(save_data, f, ensure_ascii=False, indent=2)
@@ -1188,6 +1519,13 @@ def send_notification(smtp_host, smtp_port, smtp_user, smtp_password, to_email, 
                                 send_notification(smtp_host, smtp_port, smtp_user, smtp_password, to_email, subject, message)
                         else:
                             print("[INFO] 売り注文は未約定またはエラーのため通知/ログしません")
+                    # 売却後に必ずpositions_state.jsonをリセット
+                    save_data = {
+                        "positions": [],
+                        "last_buy_price": None
+                    }
+                    with open(positions_file, 'w', encoding='utf-8') as f:
+                        json.dump(save_data, f, ensure_ascii=False, indent=2)
                 except Exception as e:
                     print(f"[ERROR] 売却処理例外: {e}", flush=True)
             elif td.get('action') == 'buy':
@@ -1219,49 +1557,12 @@ def send_notification(smtp_host, smtp_port, smtp_user, smtp_password, to_email, 
                                 if smtp_host and to_email:
                                     subject = f"【買い約定】BTC購入 {now}"
                                     message = f"【買い約定】\n時刻: {now}\n価格: {order.get('price')} 円\n数量: {order.get('amount')} BTC\n注文ID: {order.get('id', order.get('order_id', 'N/A'))}\n根拠: {reason}"
-                                    send_notification(smtp_host, smtp_port, smtp_user, smtp_password, email_to, subject, message)
+                                    send_notification(smtp_host, smtp_port, smtp_user, smtp_password, to_email, subject, message)
                                 log_trade('buy', order.get('price'), order.get('amount'), order.get('status'), reason)
                             else:
                                 print("[INFO] 買い注文は未約定またはエラーのため通知/ログしません")
             # --- ポジションが空のときだけ買い判定 ---
-            if not positions:
-                # ポジションが空ならbuy通知キーをリセット
-                state_file = 'notify_once_state.json'
-                if os.path.exists(state_file):
-                    try:
-                        import json
-                        with open(state_file, 'r', encoding='utf-8') as f:
-                            state_notify = json.load(f)
-                        state_notify['buy'] = {'time': 0}
-                        with open(state_file, 'w', encoding='utf-8') as f:
-                            json.dump(state_notify, f, ensure_ascii=False, indent=2)
-                    except Exception:
-                        pass
-                prev_high = current_price
-                buy_threshold = prev_high * 0.9
-                buy_cost = current_price * MIN_ORDER_BTC
-                if current_price <= buy_threshold and fund_manager.available_fund() - buy_cost >= 1000:
-                    if fund_manager.place_order(buy_cost):
-                        order = execute_order(exchange, PAIR, 'buy', MIN_ORDER_BTC, current_price)
-                        updated_positions.append({'price': current_price, 'amount': MIN_ORDER_BTC, 'timestamp': time.time()})
-                        set_last_buy_price(state, current_price)
-                        try:
-                            if smtp_host and email_to:
-                                subject = f"BTC購入通知 {now}"
-                                message = f"【BTC購入】\n時刻: {now}\n数量: {MIN_ORDER_BTC} BTC\n価格: {current_price} 円"
-                                send_notification(smtp_host, smtp_port, smtp_user, smtp_password, email_to, subject, message)
-                        except Exception as e:
-                            print(f"⚠️ 購入通知メール送信エラー: {e}")
-                        # ポジション情報とlast_buy_priceの保存
-                        try:
-                            save_data = {
-                                "positions": updated_positions,
-                                "last_buy_price": get_last_buy_price(state)
-                            }
-                            with open(positions_file, 'w', encoding='utf-8') as f:
-                                json.dump(save_data, f, ensure_ascii=False, indent=2)
-                        except Exception as e:
-                            print(f"ポジション保存エラー: {e}")
+            # 注文発行はtrade_decisionに一元化したため、ここでの自動買いロジックは削除
             # ポジションがなくなったらsell通知キーもリセット
             if positions == []:
                 state_file = 'notify_once_state.json'
@@ -1279,50 +1580,10 @@ def send_notification(smtp_host, smtp_port, smtp_user, smtp_password, to_email, 
             print(f"[ERROR] run_botメインループ例外: {e}", flush=True)
 
         # --- 買い注文の未約定時リトライ ---
-        limit_factor = 1.002  # デフォルト値を設定
-        for _ in range(10):  # 最大10回リトライ（最大20分）
-            time.sleep(30)  # 30秒待機
-            open_orders = get_open_orders(exchange, PAIR)
-            if not open_orders:
-                print("[INFO] 買い注文が約定しました")
-                break
-            for o in open_orders:
-                cancel_order(exchange, o['id'], PAIR)
-            limit_price = get_latest_price(exchange, PAIR) * limit_factor
-            order = execute_order(exchange, PAIR, 'buy', MIN_ORDER_BTC, limit_price)
-            print(f"[INFO] 再指値買い注文発行: {limit_price}")
+        # 注文発行はtrade_decisionに一元化したため、未約定リトライロジックは削除
 
         # --- 売り判定（強いトレンド時も売りは実行） ---
-        if sell_signal and positions:
-            # 深夜判定関数
-            def is_night():
-                import datetime
-                now = datetime.datetime.now().hour
-                return now < 6 or now >= 23
-            limit_factor = 1.004 if is_night() else 1.002  # 深夜は0.4%上、それ以外は0.2%上
-            email_to = os.getenv('TO_EMAIL')
-            if smtp_host and email_to:
-                subject = f"【買い約定】BTC購入 {now}"
-                message = f"【買い約定】\n時刻: {now}\n価格: {order.get('price')} 円\n数量: {order.get('amount')} BTC\n注文ID: {order.get('id', order.get('order_id', 'N/A'))}\n根拠: {reason}"
-                send_notification(smtp_host, smtp_port, smtp_user, smtp_password, email_to, subject, message)
-            if smtp_host and email_to:
-                subject = f"BTC購入通知 {now}"
-                message = f"【BTC購入】\n時刻: {now}\n数量: {MIN_ORDER_BTC} BTC\n価格: {current_price} 円"
-                send_notification(smtp_host, smtp_port, smtp_user, smtp_password, email_to, subject, message)
-            limit_price = current_price * limit_factor
-            order = execute_order(exchange, PAIR, 'sell', MIN_ORDER_BTC, limit_price)
-            print(f"[INFO] 指値売り注文発行: {limit_price}")
-            for _ in range(10):
-                time.sleep(30)
-                open_orders = get_open_orders(exchange, PAIR)
-                if not open_orders:
-                    print("[INFO] 売り注文が約定しました")
-                    break
-                for o in open_orders:
-                    cancel_order(exchange, o['id'], PAIR)
-                limit_price = get_latest_price(exchange, PAIR) * limit_factor
-                order = execute_order(exchange, PAIR, 'sell', MIN_ORDER_BTC, limit_price)
-                print(f"[INFO] 再指値売り注文発行: {limit_price}")
+        # 注文発行はtrade_decisionに一元化したため、ここでの売り注文・リトライロジックは削除
         # 未定義変数・判定ロジック削除
 
 def compute_indicators_long(exchange, pair='BTC/JPY', timeframe='1h', limit=1000):
@@ -1458,20 +1719,50 @@ def get_latest_price(exchange, pair='BTC/JPY'):
     return None
 
 # --- 売買判定ロジック ---
-def trade_decision(current_price, btc_balance=0.0027, buy_btc=None, last_buy_price=None, rsi=None, bb_lower=None, last_sell_price=None, ema_trend=None):
+def trade_decision(current_price, btc_balance=0.0027, buy_btc=None, last_buy_price=None, rsi=None, bb_lower=None, last_sell_price=None, ema_trend=None, jpy_balance=None, rsi_history=None, pair='BTC/JPY'):
+    # --- 予想外の大幅変動を検知しメール通知 ---
+    try:
+        smtp_host = os.getenv('SMTP_HOST')
+        smtp_port = int(os.getenv('SMTP_PORT', '465'))
+        smtp_user = os.getenv('SMTP_USER')
+        smtp_password = os.getenv('SMTP_PASS')
+        to_email = os.getenv('TO_EMAIL')
+        now = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        # 直近買値から-5%以上下落
+        if last_buy_price is not None and current_price < last_buy_price * 0.95:
+            if smtp_host and to_email:
+                subject = f"【警告】価格急落通知 {now}"
+                message = f"現在価格({current_price})が直近買値({last_buy_price})から5%以上下落しました。相場急変にご注意ください。"
+                send_notification(smtp_host, smtp_port, smtp_user, smtp_password, to_email, subject, message)
+        # 直近売値から+5%以上上昇
+        if last_sell_price is not None and current_price > last_sell_price * 1.05:
+            if smtp_host and to_email:
+                subject = f"【警告】価格急騰通知 {now}"
+                message = f"現在価格({current_price})が直近売値({last_sell_price})から5%以上上昇しました。相場急変にご注意ください。"
+                send_notification(smtp_host, smtp_port, smtp_user, smtp_password, to_email, subject, message)
+    except Exception as e:
+        print(f"[WARN] 急変動通知メール送信失敗: {e}")
+
     # current_price: 現在のBTC/JPY価格
     # btc_balance: 現在のBTC総保有量
-    # buy_btc: 売買対象のBTC量(全保有BTCの80%を推奨)
+    # buy_btc: 売買対象のBTC量(全保有BTCの85%を推奨)
     # last_buy_price: 直近の買値(売却判定に使用)
     # rsi: 最新のRSI値
     # bb_lower: ボリンジャーバンド下限
     # last_sell_price: 直近の売値
     # ema_trend: EMAやトレンド判定（例: 'up', 'down', 'side'）
-    print(f"[DEBUG] trade_decision: current_price={current_price}, btc_balance={btc_balance}, last_buy_price={last_buy_price}, last_sell_price={last_sell_price}, rsi={rsi}, bb_lower={bb_lower}, ema_trend={ema_trend}")
+    print(f"[DEBUG] trade_decision: current_price={str(current_price)}, btc_balance={str(btc_balance)}, last_buy_price={str(last_buy_price)}, last_sell_price={str(last_sell_price)}, rsi={str(rsi)}, bb_lower={str(bb_lower)}, ema_trend={str(ema_trend)}")
     # ポジションの最初の買値を基準にする
-    # 買い時のBTC量は全保有BTCの80%を使う
+    # 買い時のBTC量は0.0027BTCまたは日本円残高の85%で買う
     if buy_btc is None:
-        buy_btc = round(btc_balance * 0.8, 8) if btc_balance > 0 else 0.002
+        try:
+            if jpy_balance is not None and current_price is not None and float(current_price) > 0:
+                buy_btc = round((float(jpy_balance) * 0.85) / float(current_price), 8)
+            else:
+                buy_btc = 0.0027
+        except Exception as e:
+            print(f"[WARN] buy_btc計算エラー: {e}")
+            buy_btc = 0.0027
     first_buy_price = None
     try:
         # グローバルなpositions変数があれば参照
@@ -1485,17 +1776,76 @@ def trade_decision(current_price, btc_balance=0.0027, buy_btc=None, last_buy_pri
     if first_buy_price is None:
         first_buy_price = last_buy_price
     # --- 直近売値・買値の制限 ---
-    # 買い判定: 直近売値より高い価格では買わない
-    if btc_balance == 0 and (rsi is not None and rsi <= 35):
-        if last_sell_price is not None and current_price >= last_sell_price:
-            print(f"[INFO] 買い禁止: 直近売値({last_sell_price})以上での買いは不可")
+    # 買い判定: 直近売値が記録されていない場合は買い禁止
+    if last_sell_price is None:
+        print(f"[INFO] 買い禁止: 直近売値が記録されていないため新規買い不可")
+        return {'action': 'hold', 'amount': 0.0, 'price': current_price, 'buy_condition': False, 'sell_condition': False}
+    # 買い判定: 直近売値より安い価格でのみ買いを許可
+    if current_price >= last_sell_price:
+        print(f"[INFO] 買い禁止: 直近売値({last_sell_price})以上の価格({current_price})での買いは不可")
+        # シグナル逸脱をメール通知
+        try:
+            smtp_host = os.getenv('SMTP_HOST')
+            smtp_port = int(os.getenv('SMTP_PORT', '465'))
+            smtp_user = os.getenv('SMTP_USER')
+            smtp_password = os.getenv('SMTP_PASS')
+            to_email = os.getenv('TO_EMAIL')
+            now = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            if smtp_host and to_email:
+                subject = f"【シグナル逸脱】高値買い禁止通知 {now}"
+                message = f"直近売値({last_sell_price})以上の価格({current_price})での買いシグナルが発生しました。ロジックの見直しを推奨します。"
+                send_notification(smtp_host, smtp_port, smtp_user, smtp_password, to_email, subject, message)
+        except Exception as e:
+            print(f"[WARN] シグナル逸脱通知メール送信失敗: {e}")
+        return {'action': 'hold', 'amount': 0.0, 'price': current_price, 'buy_condition': False, 'sell_condition': False}
+    # --- 買い条件: 990万円台以下、かつRSIが30未満から35~45に戻したところで買い ---
+    if btc_balance == 0 and current_price is not None and 9900000 <= current_price < 10000000:
+        # RSIが30未満は一旦買い禁止
+        if rsi is not None and rsi < 30:
+            print(f"[INFO] 買い禁止: RSIが30未満で落ちたナイフ警戒 (RSI={rsi:.2f})")
             return {'action': 'hold', 'amount': 0.0, 'price': current_price, 'buy_condition': False, 'sell_condition': False}
-        # トレンド判定: 上昇トレンド時のみ買い
-        if ema_trend is not None and ema_trend != 'up':
-            print(f"[INFO] 買い禁止: トレンドが上昇でないため買わない (ema_trend={ema_trend})")
+        # RSIが直近で30未満→35~45に戻した場合のみ買い
+        rsi_buy_signal = False
+        if rsi_history and isinstance(rsi_history, (list, tuple)) and len(rsi_history) >= 2:
+            if rsi_history[-2] < 30 and 35 <= rsi_history[-1] <= 45:
+                rsi_buy_signal = True
+        if not rsi_buy_signal:
+            print(f"[INFO] 買い禁止: RSIが30未満から35~45に戻したタイミングでのみ買い (直近履歴: {rsi_history[-2:] if rsi_history else '不明'})")
             return {'action': 'hold', 'amount': 0.0, 'price': current_price, 'buy_condition': False, 'sell_condition': False}
+        # BB下限を大きく割り込んでいる場合も避ける
+        if bb_lower is not None and current_price < bb_lower * 0.98:
+            print(f"[INFO] 買い禁止: BB下限を大きく割り込んでいるため警戒 (現値={current_price}, BB下限={bb_lower})")
+            return {'action': 'hold', 'amount': 0.0, 'price': current_price, 'buy_condition': False, 'sell_condition': False}
+        # EMAトレンドがdownなら避ける
+        if ema_trend is not None and ema_trend == 'down':
+            print(f"[INFO] 買い禁止: EMAトレンドが下降 (ema_trend={ema_trend})")
+            return {'action': 'hold', 'amount': 0.0, 'price': current_price, 'buy_condition': False, 'sell_condition': False}
+        # すべてクリアなら買い注文を出す
+        if exchange is not None:
+            try:
+                order = exchange.create_limit_buy_order(pair, buy_btc, current_price)
+                print(f"[ORDER] 指値買い注文発注: {order}")
+            except Exception as e:
+                print(f"[ERROR] 指値買い注文失敗: {e}")
         return {'action': 'buy', 'amount': buy_btc, 'price': current_price, 'buy_condition': True}
     # 売り判定: 直近買値より安い価格では売らない
+    if last_buy_price is not None and current_price < last_buy_price:
+        print(f"[INFO] 売り禁止: 直近買値({last_buy_price})より安い価格({current_price})での売りは不可")
+        # シグナル逸脱をメール通知
+        try:
+            smtp_host = os.getenv('SMTP_HOST')
+            smtp_port = int(os.getenv('SMTP_PORT', '465'))
+            smtp_user = os.getenv('SMTP_USER')
+            smtp_password = os.getenv('SMTP_PASS')
+            to_email = os.getenv('TO_EMAIL')
+            now = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            if smtp_host and to_email:
+                subject = f"【シグナル逸脱】安値売り禁止通知 {now}"
+                message = f"直近買値({last_buy_price})より安い価格({current_price})での売りシグナルが発生しました。ロジックの見直しを推奨します。"
+                send_notification(smtp_host, smtp_port, smtp_user, smtp_password, to_email, subject, message)
+        except Exception as e:
+            print(f"[WARN] シグナル逸脱通知メール送信失敗: {e}")
+        return {'action': 'hold', 'amount': 0.0, 'price': current_price, 'buy_condition': False, 'sell_condition': False}
     # 追加条件: エントリー価格+5%以上、直近高値-5%以上
     if btc_balance > 0 and (rsi is not None and rsi >= 70):
         # 直近買値+5%未満なら売らない
@@ -1518,7 +1868,14 @@ def trade_decision(current_price, btc_balance=0.0027, buy_btc=None, last_buy_pri
         if ema_trend is not None and ema_trend != 'down':
             print(f"[INFO] 売り禁止: トレンドが下降でないため売らない (ema_trend={ema_trend})")
             return {'action': 'hold', 'amount': 0.0, 'price': current_price, 'buy_condition': False, 'sell_condition': False}
-        return {'action': 'sell', 'amount': buy_btc, 'price': current_price, 'sell_condition': True}
+        # 売りは全BTC売却、指値注文
+        if exchange is not None:
+            try:
+                order = exchange.create_limit_sell_order(pair, btc_balance, current_price)
+                print(f"[ORDER] 指値売り注文発注: {order}")
+            except Exception as e:
+                print(f"[ERROR] 指値売り注文失敗: {e}")
+        return {'action': 'sell', 'amount': btc_balance, 'price': current_price, 'sell_condition': True}
     # 何もしない
     return {'action': 'hold', 'amount': 0.0, 'price': current_price, 'buy_condition': False, 'sell_condition': False}
 
@@ -2844,7 +3201,7 @@ def run_bot(exchange, fund_manager, dry_run=False):
             except Exception as e:
                 logging.error(f"positionsファイル読み込み例外: {e}")
             logging.info("ループ末尾: sleep前")
-            time.sleep(1)
+            time.sleep(30)
             logging.info("ループ突入")
     except Exception as e:
         logging.error(f"メインループ内で例外発生: {e}")
