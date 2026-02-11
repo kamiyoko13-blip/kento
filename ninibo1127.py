@@ -1728,18 +1728,27 @@ def trade_decision(current_price, btc_balance=0.0027, buy_btc=None, last_buy_pri
         smtp_password = os.getenv('SMTP_PASS')
         to_email = os.getenv('TO_EMAIL')
         now = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        # 最新の取引価格を必ず取得
+        latest_price = current_price
+        if 'exchange' in globals() and callable(globals().get('get_latest_price', None)):
+            try:
+                latest_price = get_latest_price(globals()['exchange'], pair)
+            except Exception:
+                latest_price = current_price
         # 直近買値から-5%以上下落
-        if last_buy_price is not None and current_price < last_buy_price * 0.95:
+        if last_buy_price is not None and latest_price < last_buy_price * 0.95:
             if smtp_host and to_email:
                 subject = f"【警告】価格急落通知 {now}"
-                message = f"現在価格({current_price})が直近買値({last_buy_price})から5%以上下落しました。相場急変にご注意ください。"
+                message = f"現在価格({latest_price})が直近買値({last_buy_price})から5%以上下落しました。相場急変にご注意ください。"
                 send_notification(smtp_host, smtp_port, smtp_user, smtp_password, to_email, subject, message)
         # 直近売値から+5%以上上昇
-        if last_sell_price is not None and current_price > last_sell_price * 1.05:
+        if last_sell_price is not None and latest_price > last_sell_price * 1.05:
             if smtp_host and to_email:
                 subject = f"【警告】価格急騰通知 {now}"
-                message = f"現在価格({current_price})が直近売値({last_sell_price})から5%以上上昇しました。相場急変にご注意ください。"
+                message = f"現在価格({latest_price})が直近売値({last_sell_price})から5%以上上昇しました。相場急変にご注意ください。"
                 send_notification(smtp_host, smtp_port, smtp_user, smtp_password, to_email, subject, message)
+        # 以降の判定もlatest_priceを使う
+        current_price = latest_price
     except Exception as e:
         print(f"[WARN] 急変動通知メール送信失敗: {e}")
 
@@ -1798,8 +1807,8 @@ def trade_decision(current_price, btc_balance=0.0027, buy_btc=None, last_buy_pri
         except Exception as e:
             print(f"[WARN] シグナル逸脱通知メール送信失敗: {e}")
         return {'action': 'hold', 'amount': 0.0, 'price': current_price, 'buy_condition': False, 'sell_condition': False}
-    # --- 買い条件: 990万円台以下、かつRSIが30未満から35~45に戻したところで買い ---
-    if btc_balance == 0 and current_price is not None and 9900000 <= current_price < 10000000:
+    # --- 買い条件: 1000万円以下、かつRSIが30未満から35~45に戻したところで買い ---
+    if btc_balance == 0 and current_price is not None and current_price <= 10000000:
         # RSIが30未満は一旦買い禁止
         if rsi is not None and rsi < 30:
             print(f"[INFO] 買い禁止: RSIが30未満で落ちたナイフ警戒 (RSI={rsi:.2f})")
