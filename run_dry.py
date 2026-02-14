@@ -5,7 +5,7 @@
 import os, sys, json, traceback
 
 # Ensure dry-run and logs directory
-os.environ['DRY_RUN'] = os.environ.get('DRY_RUN', '1')
+os.environ['DRY_RUN'] = os.environ.get('DRY_RUN', '0')
 os.environ['LOG_DIR'] = os.environ.get('LOG_DIR', os.path.join(os.path.dirname(__file__), 'logs'))
 
 # Reload module if already loaded
@@ -18,10 +18,6 @@ try:
     except ModuleNotFoundError:
         sys.path.insert(0, os.path.dirname(__file__))
         import ninibo1127 as m
-except ModuleNotFoundError as e:
-    print('ERROR: ninibo1127 モジュールが見つかりません。パスやインストール状況を確認してください。')
-    print(repr(e))
-    sys.exit(2)
 except Exception as e:
     print('ERROR importing ninibo1127:', repr(e))
     traceback.print_exc()
@@ -40,3 +36,4 @@ except Exception as e:
     sys.exit(3)
 
 print('done')
+

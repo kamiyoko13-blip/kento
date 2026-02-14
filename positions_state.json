@@ -1,17 +1,4 @@
-[
-    {
-        "price": 13100000,
-        "amount": 0.0008,
-        "timestamp": 1702348800
-    },
-    {
-        "price": 14200000,
-        "amount": 0.0004,
-        "timestamp": 1702348801
-    },
-    {
-        "price": 14400000,
-        "amount": 0.0001,
-        "timestamp": 1702348802
-    }
-]
+{
+  "positions": [],
+  "last_buy_price": null
+}
