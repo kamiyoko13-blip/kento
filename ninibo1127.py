@@ -764,6 +764,32 @@ def run_bot(exchange, fund_manager, dry_run=False):
             if current_price:
                 price_history.append(current_price)
                 print(f"[DEBUG] price_history追加: 最新={current_price} / 履歴長={len(price_history)}")
+
+            # --- 900万円台突入時に一度だけメール通知 ---
+            notify_900_file = 'notify_900_once.json'
+            notified_900 = False
+            if os.path.exists(notify_900_file):
+                try:
+                    with open(notify_900_file, 'r', encoding='utf-8') as f:
+                        notified_900 = json.load(f).get('notified', False)
+                except Exception:
+                    notified_900 = False
+            if 9000000 <= current_price < 10000000 and not notified_900:
+                try:
+                    smtp_host = os.getenv('SMTP_HOST')
+                    smtp_port = int(os.getenv('SMTP_PORT', '465'))
+                    smtp_user = os.getenv('SMTP_USER')
+                    smtp_password = os.getenv('SMTP_PASS')
+                    email_to = os.getenv('TO_EMAIL')
+                    if smtp_host and email_to:
+                        now = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                        subject = f"BTC価格900万円台突入通知 {now}"
+                        message = f"BTC価格が900万円台に突入しました。現在価格: {current_price} 円"
+                        send_notification(smtp_host, smtp_port, smtp_user, smtp_password, email_to, subject, message)
+                        with open(notify_900_file, 'w', encoding='utf-8') as f:
+                            json.dump({'notified': True}, f)
+                except Exception as e:
+                    print(f"[ERROR] 900万円台突入通知エラー: {e}")
         except Exception as e:
             print(f"[ERROR] run_bot: ticker取得例外: {e}")
 
@@ -837,7 +863,27 @@ def run_bot(exchange, fund_manager, dry_run=False):
         print(f"[INFO] trade_decision結果: {td}")
 
         # --- 実際の売買処理はここに（省略/既存ロジックと統合可） ---
-        # 例: if td['action'] == 'buy': ...
+        # --- RSI判定で必ず買い注文 ---
+        try:
+            if 9000000 <= current_price < 10000000 and rsi is not None:
+                # RSI判定（例: 30未満で買い、または必ず買う）
+                # 必ず買う場合はrsi判定をスキップしてもOK
+                smtp_host = os.getenv('SMTP_HOST')
+                smtp_port = int(os.getenv('SMTP_PORT', '465'))
+                smtp_user = os.getenv('SMTP_USER')
+                smtp_password = os.getenv('SMTP_PASS')
+                email_to = os.getenv('TO_EMAIL')
+                # ここで実際の買い注文を実行（例: execute_order関数を利用）
+                # 既存の注文ロジックと重複しないよう注意
+                # 例: execute_order(exchange, PAIR, 'buy', MIN_ORDER_BTC, current_price)
+                print(f"[RSI判定] 900万円台で買い注文を実行します: 価格={current_price}, RSI={rsi}")
+                if smtp_host and email_to:
+                    now = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                    subject = f"BTC自動買い注文通知 {now}"
+                    message = f"BTC価格900万円台・RSI={rsi}で買い注文を実行しました。価格: {current_price} 円"
+                    send_notification(smtp_host, smtp_port, smtp_user, smtp_password, email_to, subject, message)
+        except Exception as e:
+            print(f"[ERROR] 900万円台RSI買い注文エラー: {e}")
 
         time.sleep(30)
 
@@ -1781,18 +1827,15 @@ def trade_decision(current_price, btc_balance=0.0027, buy_btc=None, last_buy_pri
             first_buy_price = float(positions[0].get('price', 0))
     except Exception:
         pass
-    # fallback: last_buy_price
     if first_buy_price is None:
         first_buy_price = last_buy_price
+
     # --- 直近売値・買値の制限 ---
-    # 買い判定: 直近売値が記録されていない場合は買い禁止
     if last_sell_price is None:
         print(f"[INFO] 買い禁止: 直近売値が記録されていないため新規買い不可")
         return {'action': 'hold', 'amount': 0.0, 'price': current_price, 'buy_condition': False, 'sell_condition': False}
-    # 買い判定: 直近売値より安い価格でのみ買いを許可
     if current_price >= last_sell_price:
         print(f"[INFO] 買い禁止: 直近売値({last_sell_price})以上の価格({current_price})での買いは不可")
-        # シグナル逸脱をメール通知
         try:
             smtp_host = os.getenv('SMTP_HOST')
             smtp_port = int(os.getenv('SMTP_PORT', '465'))
@@ -1807,7 +1850,21 @@ def trade_decision(current_price, btc_balance=0.0027, buy_btc=None, last_buy_pri
         except Exception as e:
             print(f"[WARN] シグナル逸脱通知メール送信失敗: {e}")
         return {'action': 'hold', 'amount': 0.0, 'price': current_price, 'buy_condition': False, 'sell_condition': False}
-    # --- 買い条件: 1000万円以下、かつRSIが30未満から35~45に戻したところで買い ---
+
+    # --- 追加: 直近安値から2%以上反発した場合のみ買い ---
+    recent_lows = None
+    try:
+        import builtins
+        closes = getattr(builtins, 'price_history', None)
+        if closes and isinstance(closes, (list, tuple)) and len(closes) >= 20:
+            recent_lows = min(closes[-20:])
+    except Exception:
+        pass
+    if recent_lows is not None and current_price < recent_lows * 1.02:
+        print(f"[INFO] 買い禁止: 直近安値({recent_lows})から2%以上反発していない (現値={current_price})")
+        return {'action': 'hold', 'amount': 0.0, 'price': current_price, 'buy_condition': False, 'sell_condition': False}
+
+    # --- 買い条件: 1000万円以下、RSI反発、EMAトレンドupまたはside ---
     if btc_balance == 0 and current_price is not None and current_price <= 10000000:
         # RSIが30未満は一旦買い禁止
         if rsi is not None and rsi < 30:
@@ -1830,12 +1887,27 @@ def trade_decision(current_price, btc_balance=0.0027, buy_btc=None, last_buy_pri
             print(f"[INFO] 買い禁止: EMAトレンドが下降 (ema_trend={ema_trend})")
             return {'action': 'hold', 'amount': 0.0, 'price': current_price, 'buy_condition': False, 'sell_condition': False}
         # すべてクリアなら買い注文を出す
+        order = None
         if exchange is not None:
             try:
                 order = exchange.create_limit_buy_order(pair, buy_btc, current_price)
                 print(f"[ORDER] 指値買い注文発注: {order}")
             except Exception as e:
                 print(f"[ERROR] 指値買い注文失敗: {e}")
+        # --- 買い注文成立時にメール通知 ---
+        try:
+            smtp_host = os.getenv('SMTP_HOST')
+            smtp_port = int(os.getenv('SMTP_PORT', '465'))
+            smtp_user = os.getenv('SMTP_USER')
+            smtp_password = os.getenv('SMTP_PASS')
+            to_email = os.getenv('TO_EMAIL')
+            now = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            if smtp_host and to_email:
+                subject = f"【BTC自動売買】買い注文発注 {now}"
+                message = f"BTC買い注文を発注しました。\n時刻: {now}\n価格: {current_price} 円\n数量: {buy_btc} BTC\n注文内容: {order if order else '注文情報なし'}"
+                send_notification(smtp_host, smtp_port, smtp_user, smtp_password, to_email, subject, message)
+        except Exception as e:
+            print(f"[ERROR] 買い注文通知メール送信失敗: {e}")
         return {'action': 'buy', 'amount': buy_btc, 'price': current_price, 'buy_condition': True}
     # 売り判定: 直近買値より安い価格では売らない
     if last_buy_price is not None and current_price < last_buy_price:
@@ -3171,6 +3243,7 @@ def run_bot(exchange, fund_manager, dry_run=False):
     COOLDOWN_SECONDS = 60 * 10  # 10分間クールダウン（必要に応じて調整）
     try:
         print("[DEBUG] run_bot: while True直前", flush=True)
+        notified_900man = False  # 900万円台通知済みフラグ
         while True:
             print("[DEBUG] run_bot: 15mテーブル出力直後", flush=True)
             # positions_state.json再読込
@@ -3200,6 +3273,38 @@ def run_bot(exchange, fund_manager, dry_run=False):
                     logging.info(f"現在価格: {current_price}")
                 except Exception as e:
                     logging.error(f"現在価格取得エラー: {e}")
+
+                # --- 900万円台になった瞬間にメール通知＆RSI注記 ---
+                if current_price is not None and 9000000 <= current_price < 10000000:
+                    if not notified_900man:
+                        # 最新のOHLCVデータからRSIを計算
+                        rsi_val = None
+                        try:
+                            if 'ohlcv_builder' in globals() and ohlcv_builder is not None:
+                                df = ohlcv_builder.to_dataframe()
+                                if not df.empty:
+                                    rsi_val = calc_rsi_from_ohlcv(df, period=14)
+                        except Exception as e:
+                            print(f"[ERROR] RSI計算失敗: {e}")
+                        # メール送信
+                        try:
+                            smtp_host = os.getenv('SMTP_HOST')
+                            smtp_port = int(os.getenv('SMTP_PORT', '465'))
+                            smtp_user = os.getenv('SMTP_USER')
+                            smtp_password = os.getenv('SMTP_PASS')
+                            email_to = os.getenv('TO_EMAIL')
+                            if smtp_host and email_to:
+                                now = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                                subject = f"BTC価格900万円台到達通知 {now}"
+                                message = f"BTCが900万円台になりました！\n時刻: {now}\n現在価格: {current_price} 円\nRSI: {rsi_val if rsi_val is not None else '取得失敗'}"
+                                send_notification(smtp_host, smtp_port, smtp_user, smtp_password, email_to, subject, message)
+                                print(f"[INFO] 900万円台到達通知メール送信: {current_price}円 RSI={rsi_val}")
+                                notified_900man = True
+                        except Exception as e:
+                            print(f"[ERROR] 900万円台通知メール送信失敗: {e}")
+                else:
+                    notified_900man = False  # 範囲外になったらリセット
+
                 # --- 5分足EMA100傾き率による買い禁止判定 ---
                 try:
                     pass
