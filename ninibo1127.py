@@ -1,6 +1,9 @@
+# --- 必要な標準ライブラリのimport ---
+import os
+
 def cleanup_trade_history(days=7):
     """trade_history.jsonからdays日以上前の履歴を削除する"""
-    import os, json, datetime
+    import json, datetime
     trade_log_file = os.path.abspath(os.path.join(os.path.dirname(__file__), 'trade_history.json'))
     if not os.path.exists(trade_log_file):
         return
@@ -31,7 +34,6 @@ import numpy as np
 from collections import deque
 import time
 import ccxt
-import os
 import json
 import pandas as pd
 
@@ -129,7 +131,6 @@ from dotenv import load_dotenv
 load_dotenv()
 # --- bitbank用ccxtインスタンス生成 ---
 import ccxt
-import os
 import json
 def create_bitbank_exchange():
     api_key = os.getenv('BITBANK_API_KEY')
@@ -179,7 +180,6 @@ if __name__ == '__main__':
         print(f'[ERROR] 履歴自動取得エラー: {e}')
 # --- 取引所APIから売買履歴を取得してtrade_history.jsonに記録する ---
 import ccxt
-import os
 import json
 def fetch_and_save_trade_history(exchange, pair='BTC/JPY', limit=100):
     try:
@@ -406,7 +406,7 @@ def get_ohlcv(exchange, symbol, timeframe='5m', limit=300):
 # --- DRY_RUN用のデフォルト価格定数 ---
 DRY_RUN_PRICE = 13000000  # 例: 1300万円（2026年1月相場に合わせて調整）
 
-import os
+
 import datetime
 import pytz
 JST = pytz.timezone('Asia/Tokyo')
@@ -545,7 +545,6 @@ def calc_ema_slope(closes, period=20, span=3):
         # 本番運用: exchangeがNoneなら即エラー
         if exchange is None:
             raise RuntimeError("本番APIインスタンスが作成できませんでした。APIキー・シークレット・.env設定を再確認してください。")
-        import os
         trade_log_file = os.path.abspath(os.path.join(os.path.dirname(__file__), 'trade_history.json'))
 
         def log_trade(action, price, amount, status, reason=None):
@@ -576,7 +575,6 @@ def calc_ema_slope(closes, period=20, span=3):
 # --- 1時間足のRSIリスト取得関数 ---
 def get_rsi_1h_series(exchange, pair='BTC/JPY', limit=300, ohlcv_data=None):
     # 1時間足のOHLCVデータからRSIリストを返す
-    import os
     import time
     import datetime
     import numpy as np
@@ -623,7 +621,6 @@ def get_rsi_1h_series(exchange, pair='BTC/JPY', limit=300, ohlcv_data=None):
 print("ninibo1127.py:", __file__)
 # --- bitbank用ccxtラッパー ---
 
-import os
 import logging
 logger = logging.getLogger("ninibo_logger")
 if not logger.hasHandlers():
@@ -677,31 +674,24 @@ def create_bitbank_exchange():
 
 
 def run_bot(exchange, fund_manager, dry_run=False):
+    import builtins
+    # --- trade_history.jsonの直近履歴を読み込む ---
+    import json
+    trade_log_file = os.path.abspath(os.path.join(os.path.dirname(__file__), 'trade_history.json'))
+    logs = []
+    if os.path.exists(trade_log_file):
+        try:
+            with open(trade_log_file, 'r', encoding='utf-8') as f:
+                logs = json.load(f)
+        except Exception as e:
+            print(f"[WARN] trade_history.jsonの読み込み失敗: {e}")
+    else:
+        print("[INFO] trade_history.jsonが存在しません")
+    builtins.logs = logs
     # --- 1h, 15m, 5m足のテクニカル指標を色付きで表示 ---
     try:
         import pandas as pd
-        # 1時間足
-        ohlcv_1h_api = exchange.fetch_ohlcv('BTC/JPY', timeframe='1h', limit=30)
-        if ohlcv_1h_api and len(ohlcv_1h_api) > 0:
-            ohlcv_1h = ohlcv_1h_api
-            df_1h = pd.DataFrame(ohlcv_1h, columns=["timestamp", "open", "high", "low", "close", "volume"])
-            df_1h["datetime"] = pd.to_datetime(df_1h["timestamp"], unit="ms")
-            df_1h.set_index("datetime", inplace=True)
-        else:
-            print("[WARN] 1h足APIデータが取得できなかったため、5分足から合成します")
-            ohlcv_5m_for_1h = exchange.fetch_ohlcv('BTC/JPY', timeframe='5m', limit=300)
-            ohlcv_1h = resample_ohlcv_5m_to_1h(ohlcv_5m_for_1h)
-            if not ohlcv_1h or len(ohlcv_1h) < 1:
-                print("[ERROR] 1h足データ取得・合成失敗")
-                df_1h = None
-            else:
-                df_1h = pd.DataFrame(ohlcv_1h, columns=["timestamp", "open", "high", "low", "close", "volume"])
-                df_1h["datetime"] = pd.to_datetime(df_1h["timestamp"], unit="ms")
-                df_1h.set_index("datetime", inplace=True)
-        rsi_1h = calc_rsi_from_ohlcv(df_1h, period=14) if df_1h is not None else None
-        ema_1h = calc_ema_from_ohlcv(df_1h, period=20) if df_1h is not None else None
-        bb_upper_1h, bb_middle_1h, bb_lower_1h = calc_bb_from_ohlcv(df_1h, period=20, num_std=2) if df_1h is not None else (None, None, None)
-        print_colored_indicators('1h', rsi_1h, ema_1h, bb_upper_1h, bb_middle_1h, bb_lower_1h)
+        print("[INFO] 1h足データ表示は省略しました")
 
         # 15分足
         ohlcv_15m = exchange.fetch_ohlcv('BTC/JPY', timeframe='15m', limit=30)
@@ -765,31 +755,7 @@ def run_bot(exchange, fund_manager, dry_run=False):
                 price_history.append(current_price)
                 print(f"[DEBUG] price_history追加: 最新={current_price} / 履歴長={len(price_history)}")
 
-            # --- 900万円台突入時に一度だけメール通知 ---
-            notify_900_file = 'notify_900_once.json'
-            notified_900 = False
-            if os.path.exists(notify_900_file):
-                try:
-                    with open(notify_900_file, 'r', encoding='utf-8') as f:
-                        notified_900 = json.load(f).get('notified', False)
-                except Exception:
-                    notified_900 = False
-            if 9000000 <= current_price < 10000000 and not notified_900:
-                try:
-                    smtp_host = os.getenv('SMTP_HOST')
-                    smtp_port = int(os.getenv('SMTP_PORT', '465'))
-                    smtp_user = os.getenv('SMTP_USER')
-                    smtp_password = os.getenv('SMTP_PASS')
-                    email_to = os.getenv('TO_EMAIL')
-                    if smtp_host and email_to:
-                        now = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-                        subject = f"BTC価格900万円台突入通知 {now}"
-                        message = f"BTC価格が900万円台に突入しました。現在価格: {current_price} 円"
-                        send_notification(smtp_host, smtp_port, smtp_user, smtp_password, email_to, subject, message)
-                        with open(notify_900_file, 'w', encoding='utf-8') as f:
-                            json.dump({'notified': True}, f)
-                except Exception as e:
-                    print(f"[ERROR] 900万円台突入通知エラー: {e}")
+            
         except Exception as e:
             print(f"[ERROR] run_bot: ticker取得例外: {e}")
 
@@ -812,8 +778,12 @@ def run_bot(exchange, fund_manager, dry_run=False):
         last_buy_price = None
         last_sell_price = None
         try:
-            if os.path.exists('trade_history.json'):
-                with open('trade_history.json', 'r', encoding='utf-8') as f:
+            # 必ずnotify_project直下のtrade_history.jsonを参照
+            trade_history_path = os.path.join(os.path.dirname(__file__), 'trade_history.json')
+            print(f"[DEBUG] trade_history.json path: {trade_history_path}")
+            if os.path.exists(trade_history_path):
+                print("[DEBUG] trade_history.json found.")
+                with open(trade_history_path, 'r', encoding='utf-8') as f:
                     logs = json.load(f)
                 # 最新のbuy/sell両方を必ず復元
                 for entry in reversed(logs):
@@ -823,6 +793,9 @@ def run_bot(exchange, fund_manager, dry_run=False):
                         last_sell_price = float(entry.get('price', 0))
                     if last_buy_price is not None and last_sell_price is not None:
                         break
+            else:
+                print("[WARN] trade_history.json NOT FOUND!")
+            print(f"[DEBUG] last_buy_price={last_buy_price}, last_sell_price={last_sell_price}")
         except Exception as e:
             print(f"[WARN] 直近売買価格取得エラー: {e}")
 
@@ -847,11 +820,37 @@ def run_bot(exchange, fund_manager, dry_run=False):
         # --- trade_decision呼び出し ---
         td = trade_decision(current_price, btc_balance=0, buy_btc=None, last_buy_price=last_buy_price, rsi=rsi, bb_lower=None, last_sell_price=last_sell_price, ema_trend=ema_trend)
 
-        # --- 日本語で売買内容を色付きで表示 ---
+        # --- 売り判定: 直近の買値より高い場合のみ売り注文を許可 ---
         from colorama import Fore, Style
         action = td.get('action')
         amount = td.get('amount')
         price = td.get('price')
+        # 売り注文は直近買値より高い価格でのみ指値注文
+        if action == 'sell':
+            if last_buy_price is not None and price is not None and price <= last_buy_price:
+                print(f"{Fore.YELLOW}【売り禁止】買値({last_buy_price:.0f}円)以下のため売却しません（現値={price:.0f}円）{Style.RESET_ALL}")
+                action = 'hold'
+            else:
+                try:
+                    order = exchange.create_limit_sell_order(PAIR, amount, price)
+                    print(f"[ORDER] 指値売り注文発注: {order}")
+                except Exception as e:
+                    print(f"[ERROR] 指値売り注文失敗: {e}")
+        # 買い注文は直近売値より安い価格でのみ指値注文
+        if action == 'buy':
+            if last_sell_price is not None and price is not None and price >= last_sell_price:
+                print(f"{Fore.YELLOW}【買い禁止】直近売値({last_sell_price:.0f}円)以上のため購入しません（現値={price:.0f}円）{Style.RESET_ALL}")
+                action = 'hold'
+            else:
+                try:
+                    order = exchange.create_limit_buy_order(PAIR, amount, price)
+                    print(f"[ORDER] 指値買い注文発注: {order}")
+                except Exception as e:
+                    print(f"[ERROR] 指値買い注文失敗: {e}")
+        if action == 'sell':
+            if last_buy_price is not None and price is not None and price <= last_buy_price:
+                print(f"{Fore.YELLOW}【売り禁止】買値({last_buy_price:.0f}円)以下のため売却しません（現値={price:.0f}円）{Style.RESET_ALL}")
+                action = 'hold'
         if action == 'buy':
             print(f"{Fore.CYAN}【買いシグナル】{price:.0f}円で{amount}BTCを購入します！{Style.RESET_ALL}")
         elif action == 'sell':
@@ -863,28 +862,7 @@ def run_bot(exchange, fund_manager, dry_run=False):
         print(f"[INFO] trade_decision結果: {td}")
 
         # --- 実際の売買処理はここに（省略/既存ロジックと統合可） ---
-        # --- RSI判定で必ず買い注文 ---
-        try:
-            if 9000000 <= current_price < 10000000 and rsi is not None:
-                # RSI判定（例: 30未満で買い、または必ず買う）
-                # 必ず買う場合はrsi判定をスキップしてもOK
-                smtp_host = os.getenv('SMTP_HOST')
-                smtp_port = int(os.getenv('SMTP_PORT', '465'))
-                smtp_user = os.getenv('SMTP_USER')
-                smtp_password = os.getenv('SMTP_PASS')
-                email_to = os.getenv('TO_EMAIL')
-                # ここで実際の買い注文を実行（例: execute_order関数を利用）
-                # 既存の注文ロジックと重複しないよう注意
-                # 例: execute_order(exchange, PAIR, 'buy', MIN_ORDER_BTC, current_price)
-                print(f"[RSI判定] 900万円台で買い注文を実行します: 価格={current_price}, RSI={rsi}")
-                if smtp_host and email_to:
-                    now = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-                    subject = f"BTC自動買い注文通知 {now}"
-                    message = f"BTC価格900万円台・RSI={rsi}で買い注文を実行しました。価格: {current_price} 円"
-                    send_notification(smtp_host, smtp_port, smtp_user, smtp_password, email_to, subject, message)
-        except Exception as e:
-            print(f"[ERROR] 900万円台RSI買い注文エラー: {e}")
-
+        
         time.sleep(30)
 
 def get_last_buy_price(state):
@@ -1206,13 +1184,13 @@ def cancel_order(exchange, order_id, pair='BTC/JPY'):
             # テーブル出力削除
 
     # --- 旧: シグナルによる直接注文部分はコメントアウト（trade_decisionのみで注文を出す） ---
-    # try:
-    #     # --- シグナル判定 ---
-    #     print("[DEBUG] run_bot: generate_signals呼び出し前")
-    #     ohlcv_1h = exchange.fetch_ohlcv('BTC/JPY', timeframe='1h', limit=300)
-    #     if not ohlcv_1h or len(ohlcv_1h) < 15:
-    #         print(f"[WARN] 1時間足OHLCVデータが{len(ohlcv_1h) if ohlcv_1h else 0}本しかありません。5分足から合成します")
-    #         ohlcv_5m = exchange.fetch_ohlcv('BTC/JPY', timeframe='5m', limit=300)
+    try:
+        if smtp_host and to_email:
+            subject = f"【BTC自動売買】買い注文発注 {now}"
+            message = f"BTC買い注文を発注しました。\n時刻: {now}\n価格: {current_price} 円\n数量: {buy_btc} BTC\n注文内容: {order if order else '注文情報なし'}"
+            send_notification(smtp_host, smtp_port, smtp_user, smtp_password, to_email, subject, message)
+    except Exception as e:
+        print(f"[ERROR] 買い注文通知メール送信失敗: {e}")
     #         ohlcv_1h = resample_ohlcv_5m_to_1h(ohlcv_5m)
     #         print(f"[DEBUG] 合成後の1時間足: {ohlcv_1h[:3]} ... total={len(ohlcv_1h)}")
     #     # シグナル生成
@@ -1307,6 +1285,7 @@ def send_notification(smtp_host, smtp_port, smtp_user, smtp_password, to_email, 
     print("[INFO] 1時間足: RSI35～40で反発時のみ売買判定を有効化")
     print("[INFO] 15分足: 買い時はRSI45以上でフィルタ、売り時はRSI60～65で警戒")
     print("[INFO] 5分足: RSI30割れ→35～38復帰で最終的な売買判定（エントリー/イグジット）")
+    # ※価格の固定閾値（例: 1080万円）は撤廃済み。現状は直近売値未満・RSI・トレンド等で判定。
     # --- 1時間足RSI反発フラグ ---
     rsi_1h_list = None
     rsi_1h_rebound = False
@@ -1354,7 +1333,6 @@ def send_notification(smtp_host, smtp_port, smtp_user, smtp_password, to_email, 
     # 本番運用: exchangeがNoneなら即エラー
     if exchange is None:
         raise RuntimeError("本番APIインスタンスが作成できませんでした。APIキー・シークレット・.env設定を再確認してください。")
-    import os
     trade_log_file = os.path.abspath(os.path.join(os.path.dirname(__file__), 'trade_history.json'))
     def log_trade(action, price, amount, status, reason=None):
         import json, datetime
@@ -1776,19 +1754,31 @@ def trade_decision(current_price, btc_balance=0.0027, buy_btc=None, last_buy_pri
         now = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
         # 最新の取引価格を必ず取得
         latest_price = current_price
+        # --- 価格取得失敗時はOHLCV終値で補完 ---
+        if (current_price is None or (isinstance(current_price, (float, int)) and current_price <= 0)) and 'exchange' in globals():
+            try:
+                ohlcv = globals()['exchange'].fetch_ohlcv(pair, timeframe='1m', limit=1)
+                if ohlcv and len(ohlcv) > 0 and len(ohlcv[-1]) >= 5:
+                    latest_price = float(ohlcv[-1][4])
+                    print(f"[INFO] current_priceが取得できなかったため、1分足終値({latest_price})で補完")
+            except Exception as e:
+                print(f"[WARN] OHLCVからの価格補完も失敗: {e}")
+        # 通常の価格取得
         if 'exchange' in globals() and callable(globals().get('get_latest_price', None)):
             try:
-                latest_price = get_latest_price(globals()['exchange'], pair)
+                tmp_price = get_latest_price(globals()['exchange'], pair)
+                if tmp_price is not None:
+                    latest_price = tmp_price
             except Exception:
-                latest_price = current_price
+                pass
         # 直近買値から-5%以上下落
-        if last_buy_price is not None and latest_price < last_buy_price * 0.95:
+        if last_buy_price is not None and latest_price is not None and latest_price < last_buy_price * 0.95:
             if smtp_host and to_email:
                 subject = f"【警告】価格急落通知 {now}"
                 message = f"現在価格({latest_price})が直近買値({last_buy_price})から5%以上下落しました。相場急変にご注意ください。"
                 send_notification(smtp_host, smtp_port, smtp_user, smtp_password, to_email, subject, message)
         # 直近売値から+5%以上上昇
-        if last_sell_price is not None and latest_price > last_sell_price * 1.05:
+        if last_sell_price is not None and latest_price is not None and latest_price > last_sell_price * 1.05:
             if smtp_host and to_email:
                 subject = f"【警告】価格急騰通知 {now}"
                 message = f"現在価格({latest_price})が直近売値({last_sell_price})から5%以上上昇しました。相場急変にご注意ください。"
@@ -1830,28 +1820,12 @@ def trade_decision(current_price, btc_balance=0.0027, buy_btc=None, last_buy_pri
     if first_buy_price is None:
         first_buy_price = last_buy_price
 
-    # --- 直近売値・買値の制限 ---
-    if last_sell_price is None:
-        print(f"[INFO] 買い禁止: 直近売値が記録されていないため新規買い不可")
-        return {'action': 'hold', 'amount': 0.0, 'price': current_price, 'buy_condition': False, 'sell_condition': False}
-    if current_price >= last_sell_price:
-        print(f"[INFO] 買い禁止: 直近売値({last_sell_price})以上の価格({current_price})での買いは不可")
-        try:
-            smtp_host = os.getenv('SMTP_HOST')
-            smtp_port = int(os.getenv('SMTP_PORT', '465'))
-            smtp_user = os.getenv('SMTP_USER')
-            smtp_password = os.getenv('SMTP_PASS')
-            to_email = os.getenv('TO_EMAIL')
-            now = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-            if smtp_host and to_email:
-                subject = f"【シグナル逸脱】高値買い禁止通知 {now}"
-                message = f"直近売値({last_sell_price})以上の価格({current_price})での買いシグナルが発生しました。ロジックの見直しを推奨します。"
-                send_notification(smtp_host, smtp_port, smtp_user, smtp_password, to_email, subject, message)
-        except Exception as e:
-            print(f"[WARN] シグナル逸脱通知メール送信失敗: {e}")
+    # --- 価格優先: 直近売値より安い価格でのみ買い注文を許可 ---
+    if last_sell_price is not None and current_price >= last_sell_price:
+        print(f"[INFO] 買い禁止: 現在価格が直近売値({last_sell_price})以上のため")
         return {'action': 'hold', 'amount': 0.0, 'price': current_price, 'buy_condition': False, 'sell_condition': False}
 
-    # --- 追加: 直近安値から2%以上反発した場合のみ買い ---
+    # --- 落ちたナイフ回避: 直近安値から2%以上反発していない場合のみ買い禁止 ---
     recent_lows = None
     try:
         import builtins
@@ -1864,51 +1838,29 @@ def trade_decision(current_price, btc_balance=0.0027, buy_btc=None, last_buy_pri
         print(f"[INFO] 買い禁止: 直近安値({recent_lows})から2%以上反発していない (現値={current_price})")
         return {'action': 'hold', 'amount': 0.0, 'price': current_price, 'buy_condition': False, 'sell_condition': False}
 
-    # --- 買い条件: 1000万円以下、RSI反発、EMAトレンドupまたはside ---
-    if btc_balance == 0 and current_price is not None and current_price <= 10000000:
-        # RSIが30未満は一旦買い禁止
-        if rsi is not None and rsi < 30:
-            print(f"[INFO] 買い禁止: RSIが30未満で落ちたナイフ警戒 (RSI={rsi:.2f})")
-            return {'action': 'hold', 'amount': 0.0, 'price': current_price, 'buy_condition': False, 'sell_condition': False}
-        # RSIが直近で30未満→35~45に戻した場合のみ買い
-        rsi_buy_signal = False
-        if rsi_history and isinstance(rsi_history, (list, tuple)) and len(rsi_history) >= 2:
-            if rsi_history[-2] < 30 and 35 <= rsi_history[-1] <= 45:
-                rsi_buy_signal = True
-        if not rsi_buy_signal:
-            print(f"[INFO] 買い禁止: RSIが30未満から35~45に戻したタイミングでのみ買い (直近履歴: {rsi_history[-2:] if rsi_history else '不明'})")
-            return {'action': 'hold', 'amount': 0.0, 'price': current_price, 'buy_condition': False, 'sell_condition': False}
-        # BB下限を大きく割り込んでいる場合も避ける
-        if bb_lower is not None and current_price < bb_lower * 0.98:
-            print(f"[INFO] 買い禁止: BB下限を大きく割り込んでいるため警戒 (現値={current_price}, BB下限={bb_lower})")
-            return {'action': 'hold', 'amount': 0.0, 'price': current_price, 'buy_condition': False, 'sell_condition': False}
-        # EMAトレンドがdownなら避ける
-        if ema_trend is not None and ema_trend == 'down':
-            print(f"[INFO] 買い禁止: EMAトレンドが下降 (ema_trend={ema_trend})")
-            return {'action': 'hold', 'amount': 0.0, 'price': current_price, 'buy_condition': False, 'sell_condition': False}
-        # すべてクリアなら買い注文を出す
-        order = None
-        if exchange is not None:
-            try:
-                order = exchange.create_limit_buy_order(pair, buy_btc, current_price)
-                print(f"[ORDER] 指値買い注文発注: {order}")
-            except Exception as e:
-                print(f"[ERROR] 指値買い注文失敗: {e}")
-        # --- 買い注文成立時にメール通知 ---
+    # --- すべてクリアなら買い注文を出す ---
+    order = None
+    if exchange is not None:
         try:
-            smtp_host = os.getenv('SMTP_HOST')
-            smtp_port = int(os.getenv('SMTP_PORT', '465'))
-            smtp_user = os.getenv('SMTP_USER')
-            smtp_password = os.getenv('SMTP_PASS')
-            to_email = os.getenv('TO_EMAIL')
-            now = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-            if smtp_host and to_email:
-                subject = f"【BTC自動売買】買い注文発注 {now}"
-                message = f"BTC買い注文を発注しました。\n時刻: {now}\n価格: {current_price} 円\n数量: {buy_btc} BTC\n注文内容: {order if order else '注文情報なし'}"
-                send_notification(smtp_host, smtp_port, smtp_user, smtp_password, to_email, subject, message)
+            order = exchange.create_limit_buy_order(pair, buy_btc, current_price)
+            print(f"[ORDER] 指値買い注文発注: {order}")
         except Exception as e:
+            print(f"[ERROR] 指値買い注文失敗: {e}")
+    # --- 買い注文成立時にメール通知 ---
+    try:
+        smtp_host = os.getenv('SMTP_HOST')
+        smtp_port = int(os.getenv('SMTP_PORT', '465'))
+        smtp_user = os.getenv('SMTP_USER')
+        smtp_password = os.getenv('SMTP_PASS')
+        to_email = os.getenv('TO_EMAIL')
+        now = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        if smtp_host and to_email:
+            subject = f"【BTC自動売買】買い注文発注 {now}"
+            message = f"BTC買い注文を発注しました。\n時刻: {now}\n価格: {current_price} 円\n数量: {buy_btc} BTC\n注文内容: {order if order else '注文情報なし'}"
+            send_notification(smtp_host, smtp_port, smtp_user, smtp_password, to_email, subject, message)
+    except Exception as e:
             print(f"[ERROR] 買い注文通知メール送信失敗: {e}")
-        return {'action': 'buy', 'amount': buy_btc, 'price': current_price, 'buy_condition': True}
+    return {'action': 'buy', 'amount': buy_btc, 'price': current_price, 'buy_condition': True}
     # 売り判定: 直近買値より安い価格では売らない
     if last_buy_price is not None and current_price < last_buy_price:
         print(f"[INFO] 売り禁止: 直近買値({last_buy_price})より安い価格({current_price})での売りは不可")
@@ -1995,10 +1947,8 @@ def update_btc_balance(btc_balance, trade_result):
     elif action == 'buy':
         btc_balance += amount
     return btc_balance
-import os
 from dotenv import load_dotenv
 
-import os
 from dotenv import load_dotenv
 from pathlib import Path
 # --- .envの読み込みは最上部で必ず実行 ---
@@ -2409,7 +2359,6 @@ def log_warn(*args, **kwargs):
 # === DI対応版のエントリーポイント ===
 
 # --- 未定義グローバル変数・定数・関数のダミー定義・import ---
-import os
 
 # Add FileLock import for file locking
 try:
@@ -2424,7 +2373,6 @@ import datetime
 
 
 # --- .envの読み込みは最上部で必ず実行 ---
-import os
 from dotenv import load_dotenv
 from pathlib import Path
 dotenv_path = os.getenv('DOTENV_PATH') or str(Path(__file__).parent / '.env')
