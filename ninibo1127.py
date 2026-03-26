@@ -1,3 +1,8 @@
+# --- グローバル定数・変数定義 ---
+PAIR = 'BTC/JPY'
+MIN_ORDER_BTC = 0.001
+positions_file = 'positions_state.json'
+state = {}
 # --- 必要な標準ライブラリのimport ---
 import os
 
@@ -719,6 +724,7 @@ def run_bot(exchange, fund_manager, dry_run=False):
     RSI_PERIOD = 14  # 標準的なRSI期間に戻す
     rsi_buy_flag = False
     PAIR = 'BTC/JPY'
+    PAIR = 'BTC/JPY'
     MIN_ORDER_BTC = 0.001
     positions_file = 'positions_state.json'
     state = {}
@@ -726,6 +732,9 @@ def run_bot(exchange, fund_manager, dry_run=False):
     last_buy_price = None
     # 初期化時に直近売値を指定値でセット
     last_sell_price = 10151701
+
+    def get_last_buy_price(state):
+        return state.get('last_buy_price') if isinstance(state, dict) else None
     if os.path.exists(positions_file):
         try:
             with open(positions_file, 'r', encoding='utf-8') as f:
@@ -742,6 +751,10 @@ def run_bot(exchange, fund_manager, dry_run=False):
         positions = []
     last_buy_time = None
     COOLDOWN_SECONDS = 60 * 10
+
+    def has_position():
+        return len(positions) > 0
+
     while True:
         print("\n==================== run_bot ループ ====================")
         current_price = None
@@ -825,32 +838,47 @@ def run_bot(exchange, fund_manager, dry_run=False):
         action = td.get('action')
         amount = td.get('amount')
         price = td.get('price')
-        # 売り注文は直近買値より高い価格でのみ指値注文
-        if action == 'sell':
-            if last_buy_price is not None and price is not None and price <= last_buy_price:
-                print(f"{Fore.YELLOW}【売り禁止】買値({last_buy_price:.0f}円)以下のため売却しません（現値={price:.0f}円）{Style.RESET_ALL}")
-                action = 'hold'
-            else:
-                try:
-                    order = exchange.create_limit_sell_order(PAIR, amount, price)
-                    print(f"[ORDER] 指値売り注文発注: {order}")
-                except Exception as e:
-                    print(f"[ERROR] 指値売り注文失敗: {e}")
-        # 買い注文は直近売値より安い価格でのみ指値注文
+
+        # --- ポジション管理に基づく売買制御 ---
+        # ポジションが無い場合のみ買い注文を許可
+
         if action == 'buy':
-            if last_sell_price is not None and price is not None and price >= last_sell_price:
+            if has_position():
+                print(f"{Fore.YELLOW}【買い禁止】既にポジション保有中のため新規買い注文は出しません{Style.RESET_ALL}")
+                action = 'hold'
+            elif last_sell_price is not None and price is not None and price >= last_sell_price:
                 print(f"{Fore.YELLOW}【買い禁止】直近売値({last_sell_price:.0f}円)以上のため購入しません（現値={price:.0f}円）{Style.RESET_ALL}")
                 action = 'hold'
             else:
                 try:
                     order = exchange.create_limit_buy_order(PAIR, amount, price)
                     print(f"[ORDER] 指値買い注文発注: {order}")
+                    # 約定時のみtrade_history.jsonに記録
+                    if order and order.get('status') in ('closed', 'filled'):
+                        log_trade('buy', order.get('price'), order.get('amount'), order.get('status'), reason='自動売買')
                 except Exception as e:
                     print(f"[ERROR] 指値買い注文失敗: {e}")
-        if action == 'sell':
-            if last_buy_price is not None and price is not None and price <= last_buy_price:
+
+        # ポジションがある場合のみ売り注文を許可
+
+        elif action == 'sell':
+            if not has_position():
+                print(f"{Fore.YELLOW}【売り禁止】ポジション未保有のため売却注文は出しません{Style.RESET_ALL}")
+                action = 'hold'
+            elif last_buy_price is not None and price is not None and price <= last_buy_price:
                 print(f"{Fore.YELLOW}【売り禁止】買値({last_buy_price:.0f}円)以下のため売却しません（現値={price:.0f}円）{Style.RESET_ALL}")
                 action = 'hold'
+            else:
+                try:
+                    order = exchange.create_limit_sell_order(PAIR, amount, price)
+                    print(f"[ORDER] 指値売り注文発注: {order}")
+                    # 約定時のみtrade_history.jsonに記録
+                    if order and order.get('status') in ('closed', 'filled'):
+                        log_trade('sell', order.get('price'), order.get('amount'), order.get('status'), reason='自動売買')
+                except Exception as e:
+                    print(f"[ERROR] 指値売り注文失敗: {e}")
+
+        # アクションごとの表示
         if action == 'buy':
             print(f"{Fore.CYAN}【買いシグナル】{price:.0f}円で{amount}BTCを購入します！{Style.RESET_ALL}")
         elif action == 'sell':
@@ -1333,33 +1361,35 @@ def send_notification(smtp_host, smtp_port, smtp_user, smtp_password, to_email, 
     # 本番運用: exchangeがNoneなら即エラー
     if exchange is None:
         raise RuntimeError("本番APIインスタンスが作成できませんでした。APIキー・シークレット・.env設定を再確認してください。")
+
+# --- trade_history.jsonに注文履歴を記録するグローバル関数 ---
+def log_trade(action, price, amount, status, reason=None):
+    import json, datetime, os
     trade_log_file = os.path.abspath(os.path.join(os.path.dirname(__file__), 'trade_history.json'))
-    def log_trade(action, price, amount, status, reason=None):
-        import json, datetime
-        # 約定（filled/closed）のみ記録
-        if status not in ("closed", "filled"):
-            return
-        try:
-            # ログエントリを作成
-            log_entry = {
-                'action': action,
-                'price': price,
-                'amount': amount,
-                'status': status,
-                'reason': reason,
-                'timestamp': datetime.datetime.now().isoformat()
-            }
-            # 既存のログファイルがあれば読み込み、なければ空リスト
-            if os.path.exists(trade_log_file):
-                with open(trade_log_file, 'r', encoding='utf-8') as f:
-                    logs = json.load(f)
-            else:
-                logs = []
-            logs.append(log_entry)
-            with open(trade_log_file, 'w', encoding='utf-8') as f:
-                json.dump(logs, f, ensure_ascii=False, indent=2)
-        except Exception as e:
-            print(f"[ERROR] 取引履歴保存エラー: {e}")
+    # 約定（filled/closed）のみ記録
+    if status not in ("closed", "filled"):
+        return
+    try:
+        # ログエントリを作成
+        log_entry = {
+            'action': action,
+            'price': price,
+            'amount': amount,
+            'status': status,
+            'reason': reason,
+            'timestamp': datetime.datetime.now().isoformat()
+        }
+        # 既存のログファイルがあれば読み込み、なければ空リスト
+        if os.path.exists(trade_log_file):
+            with open(trade_log_file, 'r', encoding='utf-8') as f:
+                logs = json.load(f)
+        else:
+            logs = []
+        logs.append(log_entry)
+        with open(trade_log_file, 'w', encoding='utf-8') as f:
+            json.dump(logs, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        print(f"[ERROR] 取引履歴保存エラー: {e}")
 
     import hashlib
     notify_state_file = 'notify_state.json'
