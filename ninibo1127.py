@@ -1827,6 +1827,11 @@ def trade_decision(current_price, btc_balance=0.0027, buy_btc=None, last_buy_pri
     # last_sell_price: 直近の売値
     # ema_trend: EMAやトレンド判定（例: 'up', 'down', 'side'）
     print(f"[DEBUG] trade_decision: current_price={str(current_price)}, btc_balance={str(btc_balance)}, last_buy_price={str(last_buy_price)}, last_sell_price={str(last_sell_price)}, rsi={str(rsi)}, bb_lower={str(bb_lower)}, ema_trend={str(ema_trend)}")
+    knife_rebound_pct = float(os.getenv('KNIFE_REBOUND_PCT', '0.005') or 0.005)
+    deep_drop_reentry_pct = float(os.getenv('DEEP_DROP_REENTRY_PCT', '0.08') or 0.08)
+    rebound_entry_pct = float(os.getenv('REBOUND_ENTRY_PCT', '0.005') or 0.005)
+    rebound_rsi_min = float(os.getenv('REBOUND_RSI_MIN', '35') or 35)
+    rebound_rsi_max = float(os.getenv('REBOUND_RSI_MAX', '62') or 62)
     # ポジションの最初の買値を基準にする
     # 買い時のBTC量は0.0027BTCまたは日本円残高の85%で買う
     if buy_btc is None:
@@ -1855,7 +1860,7 @@ def trade_decision(current_price, btc_balance=0.0027, buy_btc=None, last_buy_pri
         print(f"[INFO] 買い禁止: 現在価格が直近売値({last_sell_price})以上のため")
         return {'action': 'hold', 'amount': 0.0, 'price': current_price, 'buy_condition': False, 'sell_condition': False}
 
-    # --- 落ちたナイフ回避: 直近安値から2%以上反発していない場合のみ買い禁止 ---
+    # --- 落ちたナイフ回避: 直近安値から一定率反発していない場合は買い禁止 ---
     recent_lows = None
     try:
         import builtins
@@ -1864,8 +1869,23 @@ def trade_decision(current_price, btc_balance=0.0027, buy_btc=None, last_buy_pri
             recent_lows = min(closes[-20:])
     except Exception:
         pass
-    if recent_lows is not None and current_price < recent_lows * 1.02:
-        print(f"[INFO] 買い禁止: 直近安値({recent_lows})から2%以上反発していない (現値={current_price})")
+    if recent_lows is not None and current_price < recent_lows * (1.0 + max(0.0, knife_rebound_pct)):
+        print(f"[INFO] 買い禁止: 直近安値({recent_lows})から{knife_rebound_pct*100:.2f}%以上反発していない (現値={current_price})")
+        return {'action': 'hold', 'amount': 0.0, 'price': current_price, 'buy_condition': False, 'sell_condition': False}
+
+    # --- 急落後の小反発でのみ再エントリー ---
+    if last_sell_price is not None and recent_lows is not None and last_sell_price > 0 and recent_lows > 0:
+        deep_drop_price = last_sell_price * (1.0 - max(0.0, deep_drop_reentry_pct))
+        rebound_price = recent_lows * (1.0 + max(0.0, rebound_entry_pct))
+        if current_price > deep_drop_price:
+            print(f"[INFO] 買い禁止: 急落不足 (sell={last_sell_price}, 要件<= {deep_drop_price}, 現値={current_price})")
+            return {'action': 'hold', 'amount': 0.0, 'price': current_price, 'buy_condition': False, 'sell_condition': False}
+        if current_price < rebound_price:
+            print(f"[INFO] 買い禁止: 反発不足 (low={recent_lows}, 要件>= {rebound_price}, 現値={current_price})")
+            return {'action': 'hold', 'amount': 0.0, 'price': current_price, 'buy_condition': False, 'sell_condition': False}
+
+    if rsi is None or rsi < rebound_rsi_min or rsi > rebound_rsi_max:
+        print(f"[INFO] 買い禁止: 急落後リバウンドRSI条件未達 rsi={rsi}")
         return {'action': 'hold', 'amount': 0.0, 'price': current_price, 'buy_condition': False, 'sell_condition': False}
 
     # --- すべてクリアなら買い注文を出す ---
