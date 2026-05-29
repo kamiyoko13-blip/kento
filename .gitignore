@@ -122,3 +122,17 @@ simple_bot.log
 .DS_Store
 Thumbs.db
 desktop.ini
+
+# Local WinSCP installation artifacts
+DragExt64.dll
+WinSCP.com
+WinSCP.exe
+WinSCP.map
+WinSCPnet.dll
+license.txt
+unins000.dat
+unins000.exe
+unins000.msg
+Extensions/
+PuTTY/
+Translations/
