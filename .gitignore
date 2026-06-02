@@ -118,6 +118,9 @@ __marimo__/
 *.log
 simple_bot.log
 
+# Runtime state files
+funds_state.json
+
 # OS files
 .DS_Store
 Thumbs.db
