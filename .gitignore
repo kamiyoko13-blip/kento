@@ -120,6 +120,7 @@ simple_bot.log
 
 # Runtime state files
 funds_state.json
+trade_history.json
 
 # OS files
 .DS_Store
