@@ -1,9 +1,9 @@
 [
     {
         "action": "sell",
-        "price": 10151701,
+        "price": 12800000,
         "amount": 0.0029,
-        "timestamp": "2026-02-06T17:34:19+09:00"
+        "timestamp": "2026-05-05T00:00:00+09:00"
     },
     {
         "action": "buy",

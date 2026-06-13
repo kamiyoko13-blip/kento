@@ -1,0 +1,8 @@
+open sftp://ninitan@160.251.213.125:22 -privatekey="C:\Users\81806\.ssh\notify_deploy.ppk" -hostkey="ssh-ed25519 255 FJ9k0ZBv6g1LMaM2GSkH1fDzZ84arFsplTTIg98G/yk"
+cd /home/ninitan/notify_project
+call pkill -f /home/ninitan/notify_project/ninibo1127.py
+call mkdir -p /home/ninitan/notify_project/logs
+call nohup /home/ninitan/notify_project/venv/bin/python /home/ninitan/notify_project/ninibo1127.py >/home/ninitan/notify_project/logs/buy_watch.log 2>&1 &
+call pgrep -af 'python.*ninibo1127.py' || true
+call tail -n 40 /home/ninitan/notify_project/logs/buy_watch.log 2>/dev/null || true
+exit

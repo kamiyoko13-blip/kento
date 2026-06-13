@@ -1,0 +1,5 @@
+open sftp://ninitan@160.251.213.125:22 -privatekey="C:\Users\81806\.ssh\notify_deploy.ppk" -hostkey="ssh-ed25519 255 FJ9k0ZBv6g1LMaM2GSkH1fDzZ84arFsplTTIg98G/yk"
+call systemctl show -p ExecStart --value notify_bot.service || true
+call systemctl status notify_bot.service -l --no-pager || true
+call pgrep -af ninibo1127.py || true
+exit

@@ -1,0 +1,7 @@
+open sftp://ninitan@160.251.213.125:22 -privatekey="C:\Users\81806\.ssh\notify_deploy.ppk" -hostkey="ssh-ed25519 255 FJ9k0ZBv6g1LMaM2GSkH1fDzZ84arFsplTTIg98G/yk"
+cd /home/ninitan/notify_project
+call grep '^DRY_RUN=' .env || true
+call pgrep -af ninibo1127.py || true
+call ls -l trade_history.json bot_state.json positions_state.json 2>/dev/null || true
+call tail -n 40 logs/buy_watch.log 2>/dev/null || true
+exit

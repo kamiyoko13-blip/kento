@@ -1,0 +1,27 @@
+open sftp://ninitan@160.251.213.125:22 -privatekey="C:\Users\81806\.ssh\notify_deploy.ppk" -hostkey="ssh-ed25519 255 FJ9k0ZBv6g1LMaM2GSkH1fDzZ84arFsplTTIg98G/yk"
+cd /home/ninitan/notify_project
+call python3 - <<'PY'
+import json
+from pathlib import Path
+base = Path('/home/ninitan/notify_project')
+th = base / 'trade_history.json'
+ps = base / 'positions_state.json'
+print('trade_history_exists=', th.exists())
+print('positions_state_exists=', ps.exists())
+if ps.exists():
+    try:
+        print('positions_state_raw=', ps.read_text(encoding='utf-8'))
+    except Exception as e:
+        print('positions_state_read_error=', e)
+if th.exists():
+    data = json.loads(th.read_text(encoding='utf-8'))
+    print('trade_history_len=', len(data))
+    sells = [x for x in data if str(x.get('action','')).lower()=='sell']
+    print('sell_len=', len(sells))
+    if sells:
+        s = sells[-1]
+        print('last_sell_action=', s.get('action'))
+        print('last_sell_price=', s.get('price'))
+        print('last_sell_timestamp=', s.get('timestamp'))
+PY
+exit

@@ -1,0 +1,7 @@
+open sftp://ninitan@160.251.213.125:22 -privatekey="C:\Users\81806\.ssh\notify_deploy.ppk" -hostkey="ssh-ed25519 255 FJ9k0ZBv6g1LMaM2GSkH1fDzZ84arFsplTTIg98G/yk"
+cd /home/ninitan/notify_project
+call grep -n "sync_trade_history_with_exchange" /home/ninitan/notify_project/ninibo1127.py || true
+call grep -n "BTC残高同期" /home/ninitan/notify_project/ninibo1127.py || true
+call pgrep -af ninibo1127.py || true
+call tail -n 120 /home/ninitan/notify_project/logs/buy_watch.log 2>/dev/null || true
+exit
