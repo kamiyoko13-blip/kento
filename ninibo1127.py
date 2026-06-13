@@ -42,6 +42,32 @@ import ccxt
 import json
 import pandas as pd
 
+
+def should_send_notification(key_name, cooldown_seconds=None, state_file='notify_state.json'):
+    if cooldown_seconds is None:
+        cooldown_seconds = int(os.getenv('NOTIFY_COOLDOWN_SEC', '3600'))
+
+    now = time.time()
+    state = {}
+    if os.path.exists(state_file):
+        try:
+            with open(state_file, 'r', encoding='utf-8') as f:
+                state = json.load(f)
+        except Exception:
+            state = {}
+
+    last_sent = float(state.get(key_name, {}).get('time', 0) or 0)
+    if now - last_sent < cooldown_seconds:
+        return False
+
+    state[key_name] = {'time': now}
+    try:
+        with open(state_file, 'w', encoding='utf-8') as f:
+            json.dump(state, f, ensure_ascii=False, indent=2)
+    except Exception:
+        pass
+    return True
+
 def colorize_value(value, kind='rsi'):
     """
     指標値に応じて色を返す（RSI, BB, EMA, シグナル）
@@ -146,6 +172,100 @@ def create_bitbank_exchange():
         'enableRateLimit': True,
     })
     return exchange
+
+
+def _normalize_trade_action(entry):
+    action = entry.get('action')
+    if action in ('buy', 'sell'):
+        return action
+    side = str(entry.get('side', '')).lower()
+    if side in ('buy', 'sell'):
+        return side
+    return None
+
+
+def _trade_time_key(entry):
+    ts = entry.get('timestamp')
+    if isinstance(ts, (int, float)):
+        # ccxtのtimestampは通常ms
+        return float(ts) / (1000.0 if ts > 10**11 else 1.0)
+    if isinstance(ts, str):
+        # 数字文字列 (秒/ミリ秒) を優先処理
+        try:
+            v = float(ts)
+            return v / (1000.0 if v > 10**11 else 1.0)
+        except Exception:
+            pass
+        # ISO8601文字列
+        try:
+            return datetime.datetime.fromisoformat(ts.replace('Z', '+00:00')).timestamp()
+        except Exception:
+            pass
+    dt = entry.get('datetime')
+    if isinstance(dt, str):
+        try:
+            return datetime.datetime.fromisoformat(dt.replace('Z', '+00:00')).timestamp()
+        except Exception:
+            pass
+    return 0.0
+
+
+def sync_trade_history_with_exchange(exchange, pair='BTC/JPY', limit=200):
+    """bitbankの約定履歴を取得し、trade_history.jsonへ重複なしで統合する。"""
+    trade_log_file = os.path.abspath(os.path.join(os.path.dirname(__file__), 'trade_history.json'))
+    existing = []
+    if os.path.exists(trade_log_file):
+        try:
+            with open(trade_log_file, 'r', encoding='utf-8') as f:
+                loaded = json.load(f)
+            if isinstance(loaded, list):
+                existing = loaded
+        except Exception:
+            existing = []
+
+    merged = {}
+
+    def _key(row):
+        rid = row.get('id')
+        if rid:
+            return f"id:{rid}"
+        return "|".join([
+            str(row.get('timestamp') or row.get('datetime') or ''),
+            str(row.get('action') or row.get('side') or ''),
+            str(row.get('price') or ''),
+            str(row.get('amount') or ''),
+        ])
+
+    for row in existing:
+        if isinstance(row, dict):
+            merged[_key(row)] = row
+
+    trades = exchange.fetch_my_trades(pair, limit=limit)
+    for t in trades:
+        row = {
+            'datetime': t.get('datetime'),
+            'timestamp': t.get('timestamp') or t.get('datetime'),
+            'symbol': t.get('symbol'),
+            'side': t.get('side'),
+            'action': t.get('side'),
+            'price': t.get('price'),
+            'amount': t.get('amount'),
+            'cost': t.get('cost'),
+            'fee': t.get('fee'),
+            'order': t.get('order'),
+            'id': t.get('id'),
+            'status': t.get('status', 'filled'),
+            'info': t.get('info'),
+        }
+        merged[_key(row)] = row
+
+    def _sort_ts(row):
+        return _trade_time_key(row)
+
+    logs = sorted(merged.values(), key=_sort_ts)
+    with open(trade_log_file, 'w', encoding='utf-8') as f:
+        json.dump(logs, f, ensure_ascii=False, indent=2)
+    return logs
 
 # --- 取引所APIから売買履歴を取得してtrade_history.jsonに記録 ---
 def fetch_and_save_trade_history(exchange, pair='BTC/JPY', limit=100):
@@ -758,6 +878,7 @@ def run_bot(exchange, fund_manager, dry_run=False):
     while True:
         print("\n==================== run_bot ループ ====================")
         current_price = None
+        btc_balance = 0.0
         try:
             print(f"[DEBUG] ticker取得: PAIR={PAIR}")
             ticker = exchange.fetch_ticker(PAIR)
@@ -767,6 +888,15 @@ def run_bot(exchange, fund_manager, dry_run=False):
             if current_price:
                 price_history.append(current_price)
                 print(f"[DEBUG] price_history追加: 最新={current_price} / 履歴長={len(price_history)}")
+
+            # メール判定の前に実保有量を同期する
+            balance = exchange.fetch_balance()
+            total = balance.get('total', {}) if isinstance(balance, dict) else {}
+            free = balance.get('free', {}) if isinstance(balance, dict) else {}
+            btc_total = total.get('BTC') if isinstance(total, dict) else None
+            btc_free = free.get('BTC') if isinstance(free, dict) else None
+            btc_balance = float(btc_total if btc_total is not None else (btc_free or 0.0))
+            print(f"[DEBUG] BTC残高同期: {btc_balance}")
 
             
         except Exception as e:
@@ -791,23 +921,20 @@ def run_bot(exchange, fund_manager, dry_run=False):
         last_buy_price = None
         last_sell_price = None
         try:
-            # 必ずnotify_project直下のtrade_history.jsonを参照
-            trade_history_path = os.path.join(os.path.dirname(__file__), 'trade_history.json')
-            print(f"[DEBUG] trade_history.json path: {trade_history_path}")
-            if os.path.exists(trade_history_path):
-                print("[DEBUG] trade_history.json found.")
-                with open(trade_history_path, 'r', encoding='utf-8') as f:
-                    logs = json.load(f)
-                # 最新のbuy/sell両方を必ず復元
-                for entry in reversed(logs):
-                    if last_buy_price is None and entry.get('action') == 'buy':
-                        last_buy_price = float(entry.get('price', 0))
-                    if last_sell_price is None and entry.get('action') == 'sell':
-                        last_sell_price = float(entry.get('price', 0))
-                    if last_buy_price is not None and last_sell_price is not None:
-                        break
-            else:
-                print("[WARN] trade_history.json NOT FOUND!")
+            logs = sync_trade_history_with_exchange(exchange, pair=PAIR, limit=200)
+            # 順序に依存せず、時刻が最も新しいbuy/sellを採用
+            buy_entries = [e for e in logs if _normalize_trade_action(e) == 'buy' and e.get('price') is not None]
+            sell_entries = [e for e in logs if _normalize_trade_action(e) == 'sell' and e.get('price') is not None]
+            if buy_entries:
+                latest_buy = max(buy_entries, key=_trade_time_key)
+                last_buy_price = float(latest_buy.get('price', 0))
+            if sell_entries:
+                latest_sell = max(sell_entries, key=_trade_time_key)
+                last_sell_price = float(latest_sell.get('price', 0))
+
+            # 実保有がほぼゼロなら、買値基準の下落アラートを停止
+            if btc_balance < (MIN_ORDER_BTC * 0.5):
+                last_buy_price = None
             print(f"[DEBUG] last_buy_price={last_buy_price}, last_sell_price={last_sell_price}")
         except Exception as e:
             print(f"[WARN] 直近売買価格取得エラー: {e}")
@@ -831,7 +958,7 @@ def run_bot(exchange, fund_manager, dry_run=False):
             print(f"[WARN] EMAトレンド判定エラー: {e}")
 
         # --- trade_decision呼び出し ---
-        td = trade_decision(current_price, btc_balance=0, buy_btc=None, last_buy_price=last_buy_price, rsi=rsi, bb_lower=None, last_sell_price=last_sell_price, ema_trend=ema_trend)
+        td = trade_decision(current_price, btc_balance=btc_balance, buy_btc=None, last_buy_price=last_buy_price, rsi=rsi, bb_lower=None, last_sell_price=last_sell_price, ema_trend=ema_trend)
 
         # --- 売り判定: 直近の買値より高い場合のみ売り注文を許可 ---
         from colorama import Fore, Style
@@ -1211,14 +1338,6 @@ def cancel_order(exchange, order_id, pair='BTC/JPY'):
                 closes_15m_sample = "データ不足"
             # テーブル出力削除
 
-    # --- 旧: シグナルによる直接注文部分はコメントアウト（trade_decisionのみで注文を出す） ---
-    try:
-        if smtp_host and to_email:
-            subject = f"【BTC自動売買】買い注文発注 {now}"
-            message = f"BTC買い注文を発注しました。\n時刻: {now}\n価格: {current_price} 円\n数量: {buy_btc} BTC\n注文内容: {order if order else '注文情報なし'}"
-            send_notification(smtp_host, smtp_port, smtp_user, smtp_password, to_email, subject, message)
-    except Exception as e:
-        print(f"[ERROR] 買い注文通知メール送信失敗: {e}")
     #         ohlcv_1h = resample_ohlcv_5m_to_1h(ohlcv_5m)
     #         print(f"[DEBUG] 合成後の1時間足: {ohlcv_1h[:3]} ... total={len(ohlcv_1h)}")
     #     # シグナル生成
@@ -1450,11 +1569,11 @@ def log_trade(action, price, amount, status, reason=None):
                 smtp_password = os.getenv('SMTP_PASS')
                 to_email = os.getenv('TO_EMAIL')
                 now = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-                if signal == 'buy' and smtp_host and to_email:
+                if signal == 'buy' and smtp_host and to_email and should_send_notification('signal_1m_buy'):
                     subject = f"【1分足シグナル】買い {now}"
                     message = f"1分足RSI={rsi_1m:.2f}\nEMA={ema_1m:.2f if ema_1m else 0}\nBB: {bb_lower:.2f if bb_lower else 0} - {bb_middle:.2f if bb_middle else 0} - {bb_upper:.2f if bb_upper else 0}"
                     send_notification(smtp_host, smtp_port, smtp_user, smtp_password, to_email, subject, message)
-                if signal == 'sell_all' and smtp_host and to_email:
+                if signal == 'sell_all' and smtp_host and to_email and should_send_notification('signal_1m_sell'):
                     subject = f"【1分足シグナル】売り {now}"
                     message = f"1分足RSI={rsi_1m:.2f}\nEMA={ema_1m:.2f if ema_1m else 0}\nBB: {bb_lower:.2f if bb_lower else 0} - {bb_middle:.2f if bb_middle else 0} - {bb_upper:.2f if bb_upper else 0}"
                     send_notification(smtp_host, smtp_port, smtp_user, smtp_password, to_email, subject, message)
@@ -1801,15 +1920,21 @@ def trade_decision(current_price, btc_balance=0.0027, buy_btc=None, last_buy_pri
                     latest_price = tmp_price
             except Exception:
                 pass
-        # 直近買値から-5%以上下落
-        if last_buy_price is not None and latest_price is not None and latest_price < last_buy_price * 0.95:
-            if smtp_host and to_email:
+        has_btc_position = False
+        try:
+            has_btc_position = float(btc_balance or 0.0) > 0.0
+        except Exception:
+            has_btc_position = False
+
+        # 直近買値から-5%以上下落（保有中のみ通知）
+        if has_btc_position and last_buy_price is not None and latest_price is not None and latest_price < last_buy_price * 0.95:
+            if smtp_host and to_email and should_send_notification('price_drop_5pct'):
                 subject = f"【警告】価格急落通知 {now}"
                 message = f"現在価格({latest_price})が直近買値({last_buy_price})から5%以上下落しました。相場急変にご注意ください。"
                 send_notification(smtp_host, smtp_port, smtp_user, smtp_password, to_email, subject, message)
         # 直近売値から+5%以上上昇
         if last_sell_price is not None and latest_price is not None and latest_price > last_sell_price * 1.05:
-            if smtp_host and to_email:
+            if smtp_host and to_email and should_send_notification('price_surge_5pct'):
                 subject = f"【警告】価格急騰通知 {now}"
                 message = f"現在価格({latest_price})が直近売値({last_sell_price})から5%以上上昇しました。相場急変にご注意ください。"
                 send_notification(smtp_host, smtp_port, smtp_user, smtp_password, to_email, subject, message)
@@ -1888,28 +2013,7 @@ def trade_decision(current_price, btc_balance=0.0027, buy_btc=None, last_buy_pri
         print(f"[INFO] 買い禁止: 急落後リバウンドRSI条件未達 rsi={rsi}")
         return {'action': 'hold', 'amount': 0.0, 'price': current_price, 'buy_condition': False, 'sell_condition': False}
 
-    # --- すべてクリアなら買い注文を出す ---
-    order = None
-    if exchange is not None:
-        try:
-            order = exchange.create_limit_buy_order(pair, buy_btc, current_price)
-            print(f"[ORDER] 指値買い注文発注: {order}")
-        except Exception as e:
-            print(f"[ERROR] 指値買い注文失敗: {e}")
-    # --- 買い注文成立時にメール通知 ---
-    try:
-        smtp_host = os.getenv('SMTP_HOST')
-        smtp_port = int(os.getenv('SMTP_PORT', '465'))
-        smtp_user = os.getenv('SMTP_USER')
-        smtp_password = os.getenv('SMTP_PASS')
-        to_email = os.getenv('TO_EMAIL')
-        now = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-        if smtp_host and to_email:
-            subject = f"【BTC自動売買】買い注文発注 {now}"
-            message = f"BTC買い注文を発注しました。\n時刻: {now}\n価格: {current_price} 円\n数量: {buy_btc} BTC\n注文内容: {order if order else '注文情報なし'}"
-            send_notification(smtp_host, smtp_port, smtp_user, smtp_password, to_email, subject, message)
-    except Exception as e:
-            print(f"[ERROR] 買い注文通知メール送信失敗: {e}")
+    # 実注文と約定通知は呼び出し側で一元化する。
     return {'action': 'buy', 'amount': buy_btc, 'price': current_price, 'buy_condition': True}
     # 売り判定: 直近買値より安い価格では売らない
     if last_buy_price is not None and current_price < last_buy_price:
