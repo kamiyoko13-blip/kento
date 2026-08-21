@@ -1973,9 +1973,11 @@ def trade_decision(current_price, btc_balance=0.0027, buy_btc=None, last_buy_pri
     rebound_rsi_max = float(os.getenv('REBOUND_RSI_MAX', '62') or 62)
     profit_take_pct = float(os.getenv('PROFIT_TAKE_PCT', '10.0') or 10.0)
     trailing_sell_drop_pct = float(os.getenv('TRAILING_SELL_DROP_PCT', '0.03') or 0.03)
-    target_sell_btc = float(os.getenv('TARGET_SELL_BTC', '0.001') or 0.001)
+    target_sell_btc = float(os.getenv('TARGET_SELL_BTC', '0.0011') or 0.0011)
+    sell_on_rise_pct = float(os.getenv('SELL_ON_RISE_PCT', '0.10') or 0.10)
+    buy_on_drop_pct = float(os.getenv('BUY_ON_DROP_PCT', '0.03') or 0.03)
     min_sell_jpy = float(os.getenv('MIN_SELL_JPY', '1300') or 1300)
-    residual_sell_min_price = float(os.getenv('RESIDUAL_SELL_MIN_PRICE', '13000000') or 13000000)
+    residual_sell_min_price = float(os.getenv('RESIDUAL_SELL_MIN_PRICE', '14300000') or 14300000)
     disable_sells = str(os.getenv('DISABLE_SELLS', '0')).lower() in ('1', 'true', 'yes', 'on')
     force_dip_buy_price = float(os.getenv('FORCE_DIP_BUY_PRICE', '0') or 0)
 
@@ -1990,7 +1992,32 @@ def trade_decision(current_price, btc_balance=0.0027, buy_btc=None, last_buy_pri
         print(f"[INFO] 強制買い条件成立: 現値({float(current_price):.0f}) <= {force_dip_buy_price:.0f}")
         return {'action': 'buy', 'amount': forced_buy_amount, 'price': float(current_price), 'buy_condition': True}
 
-    # 10%到達後は高値を追跡し、下落転換で0.001BTCを売る
+    # 自動売買: 上がったら売る、下がったら買う
+    # 0.0007BTCの特別売却は無効化し、0.0011BTCを中心とした運用ルールに統一する
+    if current_price is not None and last_buy_price is not None and float(current_price) >= float(last_buy_price) * (1.0 + sell_on_rise_pct):
+        if not disable_sells:
+            sell_amount = min(max(0.0, target_sell_btc), float(btc_balance or 0.0))
+            if sell_amount > 0 and (sell_amount * float(current_price)) >= min_sell_jpy:
+                return {
+                    'action': 'sell',
+                    'amount': round(sell_amount, 8),
+                    'price': float(current_price),
+                    'sell_condition': True,
+                    'reason': f'自動売却: {sell_on_rise_pct*100:.0f}%上昇で売却'
+                }
+
+    if current_price is not None and last_sell_price is not None and float(current_price) <= float(last_sell_price) * (1.0 - buy_on_drop_pct):
+        if float(btc_balance or 0.0) <= 0.0:
+            buy_amount = max(float(target_sell_btc), 0.0011)
+            return {
+                'action': 'buy',
+                'amount': round(buy_amount, 8),
+                'price': float(current_price),
+                'buy_condition': True,
+                'reason': f'自動買い: {buy_on_drop_pct*100:.0f}%下落で再購入'
+            }
+
+    # 10%到達後は高値を追跡し、下落転換で0.0011BTCを売る
     if current_price is not None and last_buy_price is not None:
         try:
             has_btc = float(btc_balance or 0.0) > 0.0
