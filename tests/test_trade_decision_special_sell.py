@@ -69,3 +69,21 @@ def test_trade_ratio_can_be_overridden_from_env():
 
     assert result["action"] == "sell"
     assert result["amount"] == 0.00135
+
+
+def test_jpy_90_percent_buy_amount_is_used_for_entry():
+    os.environ["TRADE_RATIO"] = "0.90"
+    result = mod.trade_decision(
+        current_price=14300000,
+        btc_balance=0.0,
+        buy_btc=None,
+        last_buy_price=None,
+        rsi=40,
+        bb_lower=None,
+        last_sell_price=14500000,
+        ema_trend="down",
+        jpy_balance=2000,
+    )
+
+    assert result["action"] == "buy"
+    assert result["amount"] == 0.00012587
