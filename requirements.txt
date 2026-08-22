@@ -1,2 +1,11 @@
 ccxt
 python-dotenv
+numpy
+pandas
+colorama
+pytz
+websocket-client
+matplotlib
+tabulate
+filelock
+requests
