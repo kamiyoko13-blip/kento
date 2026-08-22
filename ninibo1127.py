@@ -3415,27 +3415,6 @@ def run_bot(exchange, fund_manager, dry_run=False):
     time.sleep(30)  # 30秒待機
     return "run_bot executed"
 
-def sell_all_positions(positions, exchange=None, pair='BTC/JPY'):
-    results = []
-    for pos in positions:
-        qty = pos.get("qty")
-        if qty is None:
-            qty = pos.get("amount")
-        if qty is None:
-            logging.warning(f"ポジションに数量(qty/amount)がありません: {pos}")
-            print(f"[WARN] ポジションに数量(qty/amount)がありません: {pos}", flush=True)
-            result = {"price": pos.get("price"), "qty": None, "status": "error", "error": "No qty/amount in position"}
-            results.append(result)
-            continue
-        try:
-            # 実際のAPI呼び出し（成行売り注文）
-            order = exchange.create_order(pair, 'market', 'sell', qty)
-            result = {"price": pos.get("price"), "qty": qty, "status": "sold", "order_id": order.get("id")}
-        except Exception as e:
-            result = {"price": pos.get("price"), "qty": qty, "status": "error", "error": str(e)}
-        results.append(result)
-    return results
-
 def get_latest_price(exchange, pair='BTC/JPY'):
     # 最新価格取得。失敗時は0.0
     try:
