@@ -336,7 +336,10 @@ def fetch_and_save_trade_history(exchange, pair='BTC/JPY', limit=100):
         print(f"[ERROR] 売買履歴取得・記録エラー: {e}")
 # --- WebSocketで板情報・出来高を取得する実用サンプル ---
 import threading
-import websocket
+try:
+    import websocket
+except Exception:
+    websocket = None
 import json
 
 orderbook_data = None  # 板情報
@@ -396,7 +399,10 @@ def start_bitbank_ws_depth():
         time.sleep(5)
 # --- WebSocketでbitbankの現在価格を取得 ---
 import threading
-import websocket
+try:
+    import websocket
+except Exception:
+    websocket = None
 import json
 
 latest_ws_price = None  # グローバルで最新価格を保持
@@ -932,8 +938,8 @@ def run_bot(exchange, fund_manager, dry_run=False):
                 latest_sell = max(sell_entries, key=_trade_time_key)
                 last_sell_price = float(latest_sell.get('price', 0))
 
-            # 実保有がほぼゼロなら、買値基準の下落アラートを停止
-            if btc_balance < (MIN_ORDER_BTC * 0.5):
+            # 実保有がゼロ以下なら、買値基準の下落アラートを停止（誤通知防止）
+            if btc_balance <= 0.0:
                 last_buy_price = None
             print(f"[DEBUG] last_buy_price={last_buy_price}, last_sell_price={last_sell_price}")
         except Exception as e:
@@ -1674,16 +1680,19 @@ def log_trade(action, price, amount, status, reason=None):
             if td.get('action') == 'sell':
                 reason = "利確条件成立（買値より10%以上上昇）"
                 try:
-                    sell_results = sell_all_positions(positions, exchange, PAIR)
+                    sell_amount = float(td.get('amount', 0.0) or 0.0)
+                    if sell_amount <= 0:
+                        sell_amount = sum(float(pos.get('amount', 0) or 0.0) for pos in positions)
+                    sell_results = sell_all_positions(positions, exchange, PAIR, sell_amount=sell_amount)
                     for res in sell_results:
                         order = res.get('order')
                         if order and order.get('status') in ('closed', 'filled'):
-                            positions = []
-                            set_last_buy_price(state, None)
+                            positions = apply_sell_amount_to_positions(positions, sell_amount)
+                            set_last_buy_price(state, None if not positions else state.get('last_buy_price'))
                             # 最新状態でファイルを上書き
                             save_data = {
                                 "positions": positions,
-                                "last_buy_price": None
+                                "last_buy_price": get_last_buy_price(state)
                             }
                             with open(positions_file, 'w', encoding='utf-8') as f:
                                 json.dump(save_data, f, ensure_ascii=False, indent=2)
@@ -1694,11 +1703,19 @@ def log_trade(action, price, amount, status, reason=None):
                                 send_notification(smtp_host, smtp_port, smtp_user, smtp_password, to_email, subject, message)
                         else:
                             print("[INFO] 売り注文は未約定またはエラーのため通知/ログしません")
-                    # 売却後に必ずpositions_state.jsonをリセット
-                    save_data = {
-                        "positions": [],
-                        "last_buy_price": None
-                    }
+                    # 売却後に残りがあれば残量を保持し、残りが無ければリセット
+                    remaining_positions = apply_sell_amount_to_positions(positions, sell_amount)
+                    if remaining_positions:
+                        save_data = {
+                            "positions": remaining_positions,
+                            "last_buy_price": state.get('last_buy_price')
+                        }
+                    else:
+                        save_data = {
+                            "positions": [],
+                            "last_buy_price": None
+                        }
+                        set_last_buy_price(state, None)
                     with open(positions_file, 'w', encoding='utf-8') as f:
                         json.dump(save_data, f, ensure_ascii=False, indent=2)
                 except Exception as e:
@@ -1959,7 +1976,7 @@ def trade_decision(current_price, btc_balance=0.0027, buy_btc=None, last_buy_pri
 
     # current_price: 現在のBTC/JPY価格
     # btc_balance: 現在のBTC総保有量
-    # buy_btc: 売買対象のBTC量(全保有BTCの85%を推奨)
+    # buy_btc: 売買対象のBTC量(全資産の90%を推奨)
     # last_buy_price: 直近の買値(売却判定に使用)
     # rsi: 最新のRSI値
     # bb_lower: ボリンジャーバンド下限
@@ -1973,101 +1990,41 @@ def trade_decision(current_price, btc_balance=0.0027, buy_btc=None, last_buy_pri
     rebound_rsi_max = float(os.getenv('REBOUND_RSI_MAX', '62') or 62)
     profit_take_pct = float(os.getenv('PROFIT_TAKE_PCT', '10.0') or 10.0)
     trailing_sell_drop_pct = float(os.getenv('TRAILING_SELL_DROP_PCT', '0.03') or 0.03)
-    target_sell_btc = float(os.getenv('TARGET_SELL_BTC', '0.0011') or 0.0011)
-    sell_on_rise_pct = float(os.getenv('SELL_ON_RISE_PCT', '0.10') or 0.10)
-    buy_on_drop_pct = float(os.getenv('BUY_ON_DROP_PCT', '0.03') or 0.03)
     min_sell_jpy = float(os.getenv('MIN_SELL_JPY', '1300') or 1300)
-    residual_sell_min_price = float(os.getenv('RESIDUAL_SELL_MIN_PRICE', '14300000') or 14300000)
-    disable_sells = str(os.getenv('DISABLE_SELLS', '0')).lower() in ('1', 'true', 'yes', 'on')
-    force_dip_buy_price = float(os.getenv('FORCE_DIP_BUY_PRICE', '0') or 0)
+    trade_ratio = float(os.getenv('TRADE_RATIO', '0.90') or 0.90)
+    trade_ratio = max(0.0, min(1.0, trade_ratio))
 
-    # 指定価格以下は相場条件を緩めて買い優先
-    if current_price is not None and force_dip_buy_price > 0 and float(current_price) <= force_dip_buy_price:
-        forced_buy_amount = 0.0027
-        try:
-            if jpy_balance is not None and float(current_price) > 0:
-                forced_buy_amount = round((float(jpy_balance) * 0.85) / float(current_price), 8)
-        except Exception:
-            pass
-        print(f"[INFO] 強制買い条件成立: 現値({float(current_price):.0f}) <= {force_dip_buy_price:.0f}")
-        return {'action': 'buy', 'amount': forced_buy_amount, 'price': float(current_price), 'buy_condition': True}
+    btc_balance_f = float(btc_balance or 0.0)
+    if btc_balance_f <= 0.0:
+        print("[INFO] 売り見送り: BTC残高が0のため再売却しません")
+        return {'action': 'hold', 'amount': 0.0, 'price': current_price, 'buy_condition': False, 'sell_condition': False}
 
-    # 自動売買: 上がったら売る、下がったら買う
-    # 0.0007BTCの特別売却は無効化し、0.0011BTCを中心とした運用ルールに統一する
-    if current_price is not None and last_buy_price is not None and float(current_price) >= float(last_buy_price) * (1.0 + sell_on_rise_pct):
-        if not disable_sells:
-            sell_amount = min(max(0.0, target_sell_btc), float(btc_balance or 0.0))
-            if sell_amount > 0 and (sell_amount * float(current_price)) >= min_sell_jpy:
-                return {
-                    'action': 'sell',
-                    'amount': round(sell_amount, 8),
-                    'price': float(current_price),
-                    'sell_condition': True,
-                    'reason': f'自動売却: {sell_on_rise_pct*100:.0f}%上昇で売却'
-                }
-
-    if current_price is not None and last_sell_price is not None and float(current_price) <= float(last_sell_price) * (1.0 - buy_on_drop_pct):
-        if float(btc_balance or 0.0) <= 0.0:
-            buy_amount = max(float(target_sell_btc), 0.0011)
+    # 90% で売却し、残高が 0 なら再売却しない。
+    if current_price is not None and last_buy_price is not None:
+        current_price_f = float(current_price)
+        last_buy_price_f = float(last_buy_price)
+        take_profit_threshold = last_buy_price_f * (1.0 + (profit_take_pct / 100.0))
+        if current_price_f >= take_profit_threshold - 1e-6:
+            sell_amount = round(max(0.0, btc_balance_f) * trade_ratio, 8)
+            if sell_amount <= 0.0:
+                print("[INFO] 売り見送り: BTC残高が0のため再売却しません")
+                return {'action': 'hold', 'amount': 0.0, 'price': current_price_f, 'buy_condition': False, 'sell_condition': False}
             return {
-                'action': 'buy',
-                'amount': round(buy_amount, 8),
-                'price': float(current_price),
-                'buy_condition': True,
-                'reason': f'自動買い: {buy_on_drop_pct*100:.0f}%下落で再購入'
+                'action': 'sell',
+                'amount': sell_amount,
+                'price': current_price_f,
+                'sell_condition': True,
+                'reason': f"利益確定：買値{last_buy_price_f:.0f}円を{profit_take_pct:.1f}%超え（90%売却）"
             }
 
-    # 10%到達後は高値を追跡し、下落転換で0.0011BTCを売る
-    if current_price is not None and last_buy_price is not None:
-        try:
-            has_btc = float(btc_balance or 0.0) > 0.0
-            current_price_f = float(current_price)
-            last_buy_price_f = float(last_buy_price)
-            if has_btc and current_price_f > 0 and last_buy_price_f > 0:
-                take_profit_price = last_buy_price_f * (1.0 + (profit_take_pct / 100.0))
-                if not hasattr(trade_decision, '_trailing_peak_by_buy_price'):
-                    trade_decision._trailing_peak_by_buy_price = {}
-                key = f"{last_buy_price_f:.2f}"
-
-                if current_price_f >= take_profit_price:
-                    prev_peak = trade_decision._trailing_peak_by_buy_price.get(key, current_price_f)
-                    peak_price = max(float(prev_peak), current_price_f)
-                    trade_decision._trailing_peak_by_buy_price[key] = peak_price
-                    trailing_trigger_price = peak_price * (1.0 - max(0.0, trailing_sell_drop_pct))
-
-                    if current_price_f <= trailing_trigger_price:
-                        sell_amount = min(max(0.0, target_sell_btc), float(btc_balance or 0.0))
-                        if sell_amount < 0.001 and current_price_f < residual_sell_min_price:
-                            print(f"[INFO] 売り見送り: 少量BTCの価格条件未達 (amount={sell_amount}, now={current_price_f:.0f}円, need>={residual_sell_min_price:.0f}円)")
-                            return {'action': 'hold', 'amount': 0.0, 'price': current_price_f, 'buy_condition': False, 'sell_condition': False}
-                        if disable_sells:
-                            print(f"[INFO] 売り停止中(DISABLE_SELLS=1): 売りシグナルを見送り")
-                            return {'action': 'hold', 'amount': 0.0, 'price': current_price_f, 'buy_condition': False, 'sell_condition': False}
-                        if sell_amount > 0 and (sell_amount * current_price_f) >= min_sell_jpy:
-                            return {
-                                'action': 'sell',
-                                'amount': round(sell_amount, 8),
-                                'price': current_price_f,
-                                'sell_condition': True,
-                                'reason': (
-                                    f"+{profit_take_pct:.1f}%到達後の下落転換 "
-                                    f"(peak={peak_price:.0f}, trigger={trailing_trigger_price:.0f}, now={current_price_f:.0f})"
-                                )
-                            }
-                        print(f"[INFO] 売り見送り: 予定売却額が最小金額未満 (amount={sell_amount}, notional={sell_amount * current_price_f:.0f}円, min={min_sell_jpy:.0f}円)")
-                    print(f"[INFO] ホールド: +{profit_take_pct:.1f}%達成後の上昇追随中 (peak={peak_price:.0f}, trigger={trailing_trigger_price:.0f}, now={current_price_f:.0f})")
-                    return {'action': 'hold', 'amount': 0.0, 'price': current_price_f, 'buy_condition': False, 'sell_condition': False}
-                return {'action': 'hold', 'amount': 0.0, 'price': current_price_f, 'buy_condition': False, 'sell_condition': False}
-        except Exception as e:
-            print(f"[WARN] 利確トレーリング判定エラー: {e}")
     # ポジションの最初の買値を基準にする
-    # 買い時のBTC量は0.0027BTCまたは日本円残高の85%で買う
+    # 買い時のBTC量は日本円残高の90%を基準に計算する
     if buy_btc is None:
         try:
             if jpy_balance is not None and current_price is not None and float(current_price) > 0:
-                buy_btc = round((float(jpy_balance) * 0.85) / float(current_price), 8)
+                buy_btc = round((float(jpy_balance) * trade_ratio) / float(current_price), 8)
             else:
-                buy_btc = 0.0027
+                buy_btc = round(0.0027 * trade_ratio, 8)
         except Exception as e:
             print(f"[WARN] buy_btc計算エラー: {e}")
             buy_btc = 0.0027
@@ -2118,66 +2075,47 @@ def trade_decision(current_price, btc_balance=0.0027, buy_btc=None, last_buy_pri
 
     # 実注文と約定通知は呼び出し側で一元化する。
     return {'action': 'buy', 'amount': buy_btc, 'price': current_price, 'buy_condition': True}
-    # 売り判定: 直近買値より安い価格では売らない
-    if last_buy_price is not None and current_price < last_buy_price:
-        print(f"[INFO] 売り禁止: 直近買値({last_buy_price})より安い価格({current_price})での売りは不可")
-        # シグナル逸脱をメール通知
-        try:
-            smtp_host = os.getenv('SMTP_HOST')
-            smtp_port = int(os.getenv('SMTP_PORT', '465'))
-            smtp_user = os.getenv('SMTP_USER')
-            smtp_password = os.getenv('SMTP_PASS')
-            to_email = os.getenv('TO_EMAIL')
-            now = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-            if smtp_host and to_email:
-                subject = f"【シグナル逸脱】安値売り禁止通知 {now}"
-                message = f"直近買値({last_buy_price})より安い価格({current_price})での売りシグナルが発生しました。ロジックの見直しを推奨します。"
-                send_notification(smtp_host, smtp_port, smtp_user, smtp_password, to_email, subject, message)
-        except Exception as e:
-            print(f"[WARN] シグナル逸脱通知メール送信失敗: {e}")
-        return {'action': 'hold', 'amount': 0.0, 'price': current_price, 'buy_condition': False, 'sell_condition': False}
-    # 追加条件: エントリー価格+5%以上、直近高値-5%以上
-    if btc_balance > 0 and (rsi is not None and rsi >= 70):
-        # 直近買値+5%未満なら売らない
-        if last_buy_price is not None and current_price < last_buy_price * 1.05:
-            print(f"[INFO] 売り禁止: エントリー価格+5%未満での売りは不可 (現在: {current_price}, 買値+5%: {last_buy_price * 1.05})")
-            return {'action': 'hold', 'amount': 0.0, 'price': current_price, 'buy_condition': False, 'sell_condition': False}
-        # 直近高値-5%未満なら売らない
-        recent_high = None
-        try:
-            import builtins
-            closes = getattr(builtins, 'price_history', None)
-            if closes and isinstance(closes, (list, tuple)) and len(closes) >= 20:
-                recent_high = max(closes[-20:])
-        except Exception:
-            pass
-        if recent_high is not None and current_price < recent_high * 0.95:
-            print(f"[INFO] 売り禁止: 直近高値-5%未満での売りは不可 (現在: {current_price}, 高値-5%: {recent_high * 0.95})")
-            return {'action': 'hold', 'amount': 0.0, 'price': current_price, 'buy_condition': False, 'sell_condition': False}
-        # トレンド判定: 下降トレンド時のみ売り
-        if ema_trend is not None and ema_trend != 'down':
-            print(f"[INFO] 売り禁止: トレンドが下降でないため売らない (ema_trend={ema_trend})")
-            return {'action': 'hold', 'amount': 0.0, 'price': current_price, 'buy_condition': False, 'sell_condition': False}
-        # 売りは全BTC売却、指値注文
-        if exchange is not None:
-            try:
-                order = exchange.create_limit_sell_order(pair, btc_balance, current_price)
-                print(f"[ORDER] 指値売り注文発注: {order}")
-            except Exception as e:
-                print(f"[ERROR] 指値売り注文失敗: {e}")
-        return {'action': 'sell', 'amount': btc_balance, 'price': current_price, 'sell_condition': True}
-    # 何もしない
-    return {'action': 'hold', 'amount': 0.0, 'price': current_price, 'buy_condition': False, 'sell_condition': False}
 
 # --- BTC残高を売買結果で更新する ---
-def sell_all_positions(positions, exchange, pair):
-    # 保有BTCの80%を売却する
+def apply_sell_amount_to_positions(positions, sell_amount):
+    """指定量だけ売却した後の残ポジションを返す。残量を守るため、売却対象を超えた分は残す。"""
+    if not positions:
+        return []
+    sell_amount = max(float(sell_amount or 0.0), 0.0)
+    if sell_amount <= 0:
+        return list(positions)
+
+    remaining = []
+    left_to_sell = sell_amount
+    for pos in positions:
+        if left_to_sell <= 0:
+            remaining.append(pos)
+            continue
+        amount = float(pos.get('amount', 0) or 0.0)
+        if amount <= 0:
+            remaining.append(pos)
+            continue
+        if amount <= left_to_sell:
+            left_to_sell -= amount
+            continue
+        new_pos = dict(pos)
+        new_pos['amount'] = round(amount - left_to_sell, 8)
+        remaining.append(new_pos)
+        left_to_sell = 0.0
+
+    return remaining
+
+
+def sell_all_positions(positions, exchange, pair, sell_amount=None):
+    # 指定量を売却し、残りのBTCを残す。未指定時は保有BTC全量を売却する。
     # positions: 保有ポジションリスト
     # exchange: ccxtの取引所オブジェクト
     # pair: 通貨ペア(例: 'BTC/JPY')
     results = []
-    total_btc = sum([pos.get('amount', 0) for pos in positions])
-    sell_amount = round(total_btc * 0.8, 8)
+    total_btc = sum([float(pos.get('amount', 0) or 0.0) for pos in positions])
+    if sell_amount is None:
+        sell_amount = total_btc
+    sell_amount = min(max(float(sell_amount or 0.0), 0.0), total_btc)
     if total_btc > 0 and sell_amount > 0:
         try:
             order = exchange.create_market_sell_order(pair, sell_amount)
