@@ -973,6 +973,9 @@ def run_bot(exchange, fund_manager, dry_run=False):
             elif price is not None and price > last_sell_price:
                 print(f"{Fore.YELLOW}【買い禁止】直近売値({last_sell_price:.0f}円)より高いため購入しません（現値={price:.0f}円）{Style.RESET_ALL}")
                 action = 'hold'
+            elif not dry_run and not _no_open_buy_order(exchange, PAIR):
+                print(f"{Fore.YELLOW}【買い見送り】未約定の買い注文が残っている（または確認できない）ため重複発注しません{Style.RESET_ALL}")
+                action = 'hold'
             else:
                 try:
                     if dry_run:
@@ -1027,6 +1030,15 @@ def run_bot(exchange, fund_manager, dry_run=False):
 
 def get_last_buy_price(state):
     return state.get('last_buy_price', None)
+
+def _no_open_buy_order(exchange, pair):
+    """未約定の買い注文が無いことを確認できた場合のみTrue（確認失敗時は重複発注を避けるためFalse）。"""
+    try:
+        open_orders = exchange.fetch_open_orders(pair)
+    except Exception as e:
+        print(f"[WARN] 未約定注文の確認に失敗: {e}")
+        return False
+    return not any(str(o.get('side', '')).lower() == 'buy' for o in open_orders or [])
 
 # 未定義関数のダミー定義（なければ）
 def get_open_orders(exchange, pair='BTC/JPY', limit=50):
@@ -1353,8 +1365,10 @@ def trade_decision(current_price, btc_balance=0.0027, buy_btc=None, last_buy_pri
         print("[INFO] 買い見送り: 現在価格が取得できないため")
         return {'action': 'hold', 'amount': 0.0, 'price': current_price, 'buy_condition': False, 'sell_condition': False}
 
-    if btc_balance_f <= 0.0 and float(current_price) > float(last_sell_price):
-        print(f"[INFO] 買い禁止: 現在価格が直近売値({last_sell_price})以上のため")
+    buy_drop_pct = max(0.0, float(os.getenv('BUY_DROP_PCT', '0') or 0))
+    buy_trigger_price = float(last_sell_price) * (1.0 - buy_drop_pct / 100.0)
+    if btc_balance_f <= 0.0 and float(current_price) > buy_trigger_price:
+        print(f"[INFO] 買い禁止: 現在価格が買い基準({buy_trigger_price:.0f}円 = 直近売値{last_sell_price}の-{buy_drop_pct:g}%)より高いため")
         return {'action': 'hold', 'amount': 0.0, 'price': current_price, 'buy_condition': False, 'sell_condition': False}
 
     # Re-enter at or below the latest sell price, with yen budget and balance caps.

@@ -102,6 +102,46 @@ def test_rebuy_waits_while_price_is_above_last_sell(monkeypatch):
     assert result["action"] == "hold"
 
 
+def test_rebuy_respects_configured_drop_percentage(monkeypatch):
+    monkeypatch.setenv("BUY_DROP_PCT", "0.5")
+    monkeypatch.setenv("BUY_BUDGET_JPY", "20000")
+    monkeypatch.setenv("MIN_ORDER_BTC", "0.0011")
+
+    result = mod.trade_decision(
+        current_price=12_300_000,
+        btc_balance=0,
+        last_sell_price=12_300_000,
+        jpy_balance=17_000,
+    )
+
+    assert result["action"] == "hold"
+
+
+def test_pair_constant_is_defined_at_module_scope():
+    assert mod.PAIR == "BTC/JPY"
+
+
+def test_open_buy_order_check_fails_closed():
+    class Exchange:
+        def __init__(self, orders=None, error=None):
+            self.orders = orders
+            self.error = error
+
+        def fetch_open_orders(self, pair):
+            assert pair == mod.PAIR
+            if self.error:
+                raise self.error
+            return self.orders
+
+    assert mod._no_open_buy_order(Exchange(orders=[]), mod.PAIR)
+    assert not mod._no_open_buy_order(
+        Exchange(orders=[{"side": "BUY"}]), mod.PAIR
+    )
+    assert not mod._no_open_buy_order(
+        Exchange(error=RuntimeError("unavailable")), mod.PAIR
+    )
+
+
 def test_rebuy_is_skipped_when_last_sell_price_is_unknown():
     result = mod.trade_decision(
         current_price=12_000_000,
